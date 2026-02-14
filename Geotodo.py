@@ -23,7 +23,7 @@ st.set_page_config(
 
 st.title("🎲 Geotodo - Análisis de Sorteos")
 st.markdown("Sistema de Análisis para los sorteos de Geotodo (Mañana, Tarde y Noche).")
-st.info("ℹ️ **Importante:** Cálculos basados PROMEDIO (Mean) SOLO para el número **FIJO**.")
+st.info("ℹ️ **Importante:** Cálculos basados en PROMEDIO (Mean) SOLO para el número **FIJO**.")
 
 # --- FUNCIÓN AUXILIAR PARA ELIMINAR ACENTOS ---
 def remove_accents(input_str):
@@ -91,6 +91,7 @@ def cargar_datos_geotodo(_ruta_csv, debug_mode=False):
         if debug_mode:
             st.write("Valores únicos en 'Tipo_Sorteo' después de normalizar:", df_historial['Tipo_Sorteo'].unique())
         
+        # --- CARGAR TODOS LOS DATOS (FIJO + CORRIDOS) ---
         df_procesado = []
         for _, row in df_historial.iterrows():
             fecha = row['Fecha']
@@ -102,7 +103,7 @@ def cargar_datos_geotodo(_ruta_csv, debug_mode=False):
             except ValueError:
                 continue
 
-            # Se agregan todos los datos a la lista procesada
+            # Guardamos Fijo, 1er y 2do Corrido en un solo DataFrame maestro
             df_procesado.append({'Fecha': fecha, 'Tipo_Sorteo': tipo_sorteo, 'Numero': fijo, 'Posicion': 'Fijo'})
             df_procesado.append({'Fecha': fecha, 'Tipo_Sorteo': tipo_sorteo, 'Numero': p1, 'Posicion': '1er Corrido'})
             df_procesado.append({'Fecha': fecha, 'Tipo_Sorteo': tipo_sorteo, 'Numero': p2, 'Posicion': '2do Corrido'})
@@ -112,19 +113,14 @@ def cargar_datos_geotodo(_ruta_csv, debug_mode=False):
         df_historial.dropna(subset=['Numero'], inplace=True)
         df_historial['Numero'] = df_historial['Numero'].astype(int)
         
-        # --- CAMBIO IMPORTANTE: FILTRAR SOLO 'FIJO' ---
-        # Esto asegura que TODOS los cálculos posteriores ignoren el 1er y 2do corrido.
-        df_historial = df_historial[df_historial['Posicion'] == 'Fijo'].copy()
-        st.info("🔍 **Modo de Análisis:** Se han filtrado los datos para usar SOLO el número 'Fijo'.")
-        # ---------------------------------------
-        
+        # Orden cronológico
         draw_order_map = {'M': 0, 'T': 1, 'N': 2}
         df_historial['draw_order'] = df_historial['Tipo_Sorteo'].map(draw_order_map).fillna(3)
         df_historial['sort_key'] = df_historial['Fecha'] + pd.to_timedelta(df_historial['draw_order'], unit='h')
         df_historial = df_historial.sort_values(by='sort_key').reset_index(drop=True)
         df_historial.drop(columns=['draw_order', 'sort_key'], inplace=True)
         
-        st.success("¡Datos de Geotodo cargados y procesados con éxito (Solo Fijo)!")
+        st.success("¡Datos de Geotodo cargados y procesados con éxito!")
         return df_historial
     except Exception as e:
         st.error(f"Error al cargar y procesar los datos de Geotodo: {str(e)}")
@@ -144,15 +140,18 @@ def calcular_estado_actual(gap, promedio_gap):
     else: 
         return "Vencido"
 
-# --- FUNCIÓN PARA OBTENER ESTADO COMPLETO DE NÚMEROS ---
+# --- FUNCIÓN PARA OBTENER ESTADO COMPLETO DE NÚMEROS (SOLO FIJO) ---
 def get_full_state_dataframe(df_historial, fecha_referencia):
+    df_solo_fijo = df_historial[df_historial['Posicion'] == 'Fijo'].copy()
+    df_historial_filtrado = df_solo_fijo[df_solo_fijo['Fecha'] < fecha_referencia].copy()
+    
     st.info(f"📅 **Análisis de Estado:** Calculando el estado de todos los números hasta la fecha **{fecha_referencia.strftime('%d/%m/%Y')}**.")
-    df_historial_filtrado = df_historial[df_historial['Fecha'] < fecha_referencia].copy()
+    
     if df_historial_filtrado.empty:
         return pd.DataFrame(), {}
 
     df_maestro = pd.DataFrame({'Numero': range(100)})
-    primera_fecha_historica = df_historial['Fecha'].min()
+    primera_fecha_historica = df_historial_filtrado['Fecha'].min()
     st.info("Pre-calculando promedios históricos (Mean) individuales para cada número...")
     
     historicos_numero = {}
@@ -161,7 +160,6 @@ def get_full_state_dataframe(df_historial, fecha_referencia):
         gaps = fechas_i.diff().dt.days.dropna()
         
         if len(gaps) > 0:
-            # Usar Mean para coincidir con Excel
             historicos_numero[i] = gaps.mean()
         else:
             historicos_numero[i] = (fecha_referencia - primera_fecha_historica).days
@@ -180,6 +178,80 @@ def get_full_state_dataframe(df_historial, fecha_referencia):
 
     return df_maestro, historicos_numero
 
+# --- NUEVA FUNCIÓN: ANÁLISIS DE REBOTE TEMPORAL (EVENTO) ---
+def analizar_evento_rebote_temporal(df_completo, fecha_referencia, meses_atras=6):
+    """
+    Analiza el fenómeno 'Rebote' como un EVENTO TEMPORAL.
+    Objetivo: Saber CUÁNTO tiempo ha pasado desde el último rebote y si estamos cerca del promedio.
+    """
+    st.info(f"⏳ **Análisis de Evento 'Rebote':** Midiendo la frecuencia del fenómeno 'Corridoayer -> Fijohoy' (Últimos {meses_atras} meses).")
+    
+    fecha_limite = fecha_referencia - pd.DateOffset(months=meses_atras)
+    
+    # Filtrar historial por fecha (TODAS las posiciones son necesarias para detectar el evento)
+    df_historial_filtrado = df_completo[df_completo['Fecha'] >= fecha_limite].copy()
+    
+    # Separamos Fijos y Corridos para cruzarlos
+    df_fijos = df_historial_filtrado[df_historial_filtrado['Posicion'] == 'Fijo'].sort_values('Fecha')
+    df_corridos = df_historial_filtrado[df_historial_filtrado['Posicion'].isin(['1er Corrido', '2do Corrido'])].sort_values('Fecha')
+    
+    fechas_con_evento_rebote = []
+    
+    # Iteramos sobre cada sorteo (Fijo) para ver si ese día hubo rebote
+    fechas_unicas_sorteos = df_fijos['Fecha'].unique()
+    
+    for fecha in fechas_unicas_sorteos:
+        # Obtener los números Fijo de este día
+        fijos_hoy = df_fijos[df_fijos['Fecha'] == fecha]['Numero'].tolist()
+        
+        # Obtener los números Corrido del día anterior
+        ventana_inicio = fecha - pd.Timedelta(days=1)
+        ventana_fin = fecha
+        corridos_ayer = df_corridos[
+            (df_corridos['Fecha'] >= ventana_inicio) & 
+            (df_corridos['Fecha'] < ventana_fin)
+        ]['Numero'].tolist()
+        
+        # Verificar si HUBO coincidencia (Evento Rebote = True/False)
+        # Nos basta con saber si ocurrió al menos una vez
+        if any(num in corridos_ayer for num in fijos_hoy):
+            fechas_con_evento_rebote.append(fecha)
+            
+    # Análisis de los Gaps entre eventos
+    if len(fechas_con_evento_rebote) < 2:
+        return {
+            'estado': 'Insuficientes Datos',
+            'ultimo_evento': fechas_con_evento_rebote[-1] if fechas_con_evento_rebote else None,
+            'dias_sin_evento': None,
+            'promedio_dias': None,
+            'detalles': fechas_con_evento_rebote
+        }
+        
+    df_eventos = pd.DataFrame({'Fecha': fechas_con_evento_rebote}).sort_values('Fecha')
+    gaps_eventos = df_eventos['Fecha'].diff().dt.days.dropna()
+    
+    promedio_dias_entre_rebotes = gaps_eventos.mean()
+    
+    ultimo_evento_fecha = df_eventos['Fecha'].max()
+    dias_desde_ultimo = (fecha_referencia - ultimo_evento_fecha).days
+    
+    # Determinar el estado del evento hoy
+    if dias_desde_ultimo > (promedio_dias_entre_rebotes * 1.2):
+        estado_evento = "🔴 EVENTO MUY VENCIDO (Alta probabilidad de que ocurra hoy)"
+    elif dias_desde_ultimo > promedio_dias_entre_rebotes:
+        estado_evento = "🟡 EVENTO VENCIDO (Zona de rebote)"
+    else:
+        estado_evento = "🟢 EVENTO NORMAL (Dentro de promedio)"
+
+    return {
+        'estado': estado_evento,
+        'ultimo_evento': ultimo_evento_fecha,
+        'dias_sin_evento': dias_desde_ultimo,
+        'promedio_dias': round(promedio_dias_entre_rebotes, 1),
+        'gaps_historicos': gaps_eventos.tolist(),
+        'detalles': fechas_con_evento_rebote
+    }
+
 # --- FUNCIÓN PARA CLASIFICAR NÚMEROS POR TEMPERATURA ---
 def crear_mapa_de_calor_numeros(df_frecuencia, top_n=30, medio_n=30):
     df_ordenado = df_frecuencia.sort_values(by='Total_Salidas_Historico', ascending=False).reset_index(drop=True).copy()
@@ -188,19 +260,20 @@ def crear_mapa_de_calor_numeros(df_frecuencia, top_n=30, medio_n=30):
     df_ordenado.loc[0 : top_n - 1, 'Temperatura'] = '🔥 Caliente'
     return df_ordenado
 
-# --- FUNCIÓN PARA ANÁLISIS DE OPORTUNIDAD POR DÍGITO ---
-def analizar_oportunidad_por_digito(df_historial, df_estados_completos, historicos_numero, modo_temperatura, fecha_inicio_rango, fecha_fin_rango, top_n_candidatos=5):
+# --- FUNCIÓN PARA ANÁLISIS DE OPORTUNIDAD POR DÍGITO (MODIFICADA: SIN MAPA DE CALOR POSICIONAL) ---
+def analizar_oportunidad_por_digito(df_historial, df_estados_completos, historicos_numero, modo_temperatura, fecha_inicio_rango, fecha_fin_rango):
+    df_solo_fijo = df_historial[df_historial['Posicion'] == 'Fijo'].copy()
     st.info(f"🎯 **Análisis de Oportunidad por Dígito:** Iniciando análisis en modo: **{modo_temperatura}**.")
     
     if modo_temperatura == "Histórico Completo":
-        df_temperatura = df_historial.copy()
+        df_temperatura = df_solo_fijo.copy()
         st.info(f"🌡️ **Análisis de Temperatura:** Se usará el **historial completo** de la sesión seleccionada.")
     else:
         end_of_day = fecha_fin_rango + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
-        df_temperatura = df_historial[(df_historial['Fecha'] >= fecha_inicio_rango) & (df_historial['Fecha'] <= end_of_day)].copy()
+        df_temperatura = df_solo_fijo[(df_solo_fijo['Fecha'] >= fecha_inicio_rango) & (df_solo_fijo['Fecha'] <= end_of_day)].copy()
         if df_temperatura.empty:
             st.warning("El rango seleccionado no contiene sorteos. Se usará el historial completo.")
-            df_temperatura = df_historial.copy()
+            df_temperatura = df_solo_fijo.copy()
         else:
             st.success(f"✅ Análisis de Temperatura: Rango {fecha_inicio_rango.strftime('%d/%m/%Y')} a {fecha_fin_rango.strftime('%d/%m/%Y')}.")
 
@@ -276,95 +349,43 @@ def analizar_oportunidad_por_digito(df_historial, df_estados_completos, historic
     df_oportunidad_decenas = pd.DataFrame(resultados_decenas)
     df_oportunidad_unidades = pd.DataFrame(resultados_unidades)
 
-    puntuacion_decena_map = df_oportunidad_decenas.set_index('Dígito')['Puntuación Total'].to_dict()
-    puntuacion_unidad_map = df_oportunidad_unidades.set_index('Dígito')['Puntuación Total'].to_dict()
+    # CORRECCIÓN AQUÍ: Retornar los nombres correctos de las variables
+    return df_oportunidad_decenas, df_oportunidad_unidades, mapa_temperatura_decenas, mapa_temperatura_unidades
 
-    candidatos = []
-    for num in range(100):
-        decena = num // 10
-        unidad = num % 10
-        score_total = puntuacion_decena_map.get(decena, 0) + puntuacion_unidad_map.get(unidad, 0)
-        candidatos.append({'Numero': num, 'Puntuación Total': score_total})
-
-    df_candidatos = pd.DataFrame(candidatos).sort_values(by='Puntuación Total', ascending=False).head(top_n_candidatos)
-    df_candidatos['Numero'] = df_candidatos['Numero'].apply(lambda x: f"{x:02d}")
-
-    return df_oportunidad_decenas, df_oportunidad_unidades, df_candidatos, mapa_temperatura_decenas, mapa_temperatura_unidades
-
-# --- FUNCIÓN PARA MAPA DE CALOR POSICIONAL ---
-def crear_mapa_calor_posicional(mapa_temp_decenas, mapa_temp_unidades):
-    temp_valores = {'🔥 Caliente': 3, '🟡 Tibio': 2, '🧊 Frío': 1}
-    matriz_calor = np.zeros((10, 10))
-    for unidad in range(10):
-        for decena in range(10):
-            temp_dec = mapa_temp_decenas.get(decena, '🟡 Tibio')
-            temp_uni = mapa_temp_unidades.get(unidad, '🟡 Tibio')
-            puntuacion = temp_valores[temp_dec] * 10 + temp_valores[temp_uni]
-            matriz_calor[unidad, decena] = puntuacion
-    return pd.DataFrame(matriz_calor, index=range(10), columns=range(10))
-
-def analizar_combinaciones_extremas(mapa_temp_decenas, mapa_temp_unidades, df_estados_completos):
-    hot_cold, cold_hot, hot_hot, cold_cold = [], [], [], []
-    puntuaciones_desequilibrio = {}
-    columnas_requeridas = ['Decena', 'Unidad', 'Numero']
-    for col in columnas_requeridas:
-        if col not in df_estados_completos.columns:
-            st.error(f"Falta la columna '{col}' en el DataFrame.")
-            st.stop()
+# --- FUNCIÓN: LISTADO POR DECENAS Y ESTADO ---
+def mostrar_listado_decenas_detalle(df_estados_completos):
+    st.subheader("📋 Listado Detallado de Números por Decenas y su Estado")
+    st.markdown("A continuación se muestran los números de 00 a 99 agrupados por su Decena, junto con su estado actual individual.")
     
-    for num in range(100):
-        decena = num // 10
-        unidad = num % 10
-        temp_dec = mapa_temp_decenas.get(decena, '🟡 Tibio')
-        temp_uni = mapa_temp_unidades.get(unidad, '🟡 Tibio')
-        
-        temp_valores = {'🔥 Caliente': 3, '🟡 Tibio': 2, '🧊 Frío': 1}
-        score_dec = temp_valores[temp_dec]
-        score_uni = temp_valores[temp_uni]
-        puntuacion_desequilibrio = abs(score_dec - score_uni)
-        puntuaciones_desequilibrio[num] = puntuacion_desequilibrio
-        
-        num_str = f"{num:02d}"
-        if temp_dec == '🔥 Caliente' and temp_uni == '🧊 Frío': hot_cold.append(num_str)
-        elif temp_dec == '🧊 Frío' and temp_uni == '🔥 Caliente': cold_hot.append(num_str)
-        elif temp_dec == '🔥 Caliente' and temp_uni == '🔥 Caliente': hot_hot.append(num_str)
-        elif temp_dec == '🧊 Frío' and temp_uni == '🧊 Frío': cold_cold.append(num_str)
-
-    hot_cold.sort(key=lambda x: puntuaciones_desequilibrio[int(x)], reverse=True)
-    cold_hot.sort(key=lambda x: puntuaciones_desequilibrio[int(x)], reverse=True)
-    hot_hot.sort(key=lambda x: puntuaciones_desequilibrio[int(x)], reverse=True)
-    cold_cold.sort(key=lambda x: puntuaciones_desequilibrio[int(x)], reverse=True)
+    # Crear un contenedor para las 10 decenas
+    cols = st.columns(5) # 2 columnas de 5 items cada una = 10 decenas
     
-    df_hot_cold = pd.DataFrame({
-        'Número': hot_cold, 
-        'Puntuación Desequilibrio': [puntuaciones_desequilibrio[int(x)] for x in hot_cold]
-    })
-    
-    df_cold_hot = pd.DataFrame({
-        'Número': cold_hot, 
-        'Puntuación Desequilibrio': [puntuaciones_desequilibrio[int(x)] for x in cold_hot]
-    })
-    
-    df_hot_hot = pd.DataFrame({
-        'Número': hot_hot, 
-        'Puntuación Desequilibrio': [puntuaciones_desequilibrio[int(x)] for x in hot_hot]
-    })
-    
-    df_cold_cold = pd.DataFrame({
-        'Número': cold_cold, 
-        'Puntuación Desequilibrio': [puntuaciones_desequilibrio[int(x)] for x in cold_cold]
-    })
-    
-    return df_hot_cold, df_cold_hot, df_hot_hot, df_cold_cold
+    for i in range(10):
+        with cols[i % 5]:
+            st.markdown(f"### Decena {i}")
+            
+            # Filtrar números de esta decena (0-9, 10-19, etc)
+            numeros_decena = df_estados_completos[df_estados_completos['Decena'] == i].sort_values('Numero')
+            
+            if not numeros_decena.empty:
+                # Crear un string formateado para mostrar
+                for _, row in numeros_decena.iterrows():
+                    num_str = f"{row['Numero']:02d}"
+                    estado = row['Estado_Numero']
+                    
+                    # Iconos según estado
+                    icono = "⚪"
+                    if estado == "Vencido": icono = "🟡"
+                    elif estado == "Muy Vencido": icono = "🔴"
+                    
+                    st.markdown(f"<small>{icono} <b>{num_str}</b>: {estado}</small>", unsafe_allow_html=True)
+            else:
+                st.write("Sin datos")
 
 # --- FUNCIÓN PARA AUDITORÍA HISTÓRICA ---
 def generar_auditoria_doble_normal(df_historial):
-    st.info("🔍 **Auditoría Histórica:** Buscando todos los eventos 'Doble Normal' en el historial para validar la aleatoriedad.")
-    
-    # df_historial ya viene filtrado solo Fijo, pero filtramos por si acaso
     df_fijo = df_historial[df_historial['Posicion'] == 'Fijo'].copy()
     if df_fijo.empty:
-        st.warning("No hay datos para auditoría.")
         return pd.DataFrame()
 
     fechas_unicas = df_fijo['Fecha'].unique()
@@ -389,7 +410,7 @@ def generar_auditoria_doble_normal(df_historial):
                 if len(fechas) == 0: return 'Normal', 0, 0
                 gaps = fechas.diff().dt.days.dropna()
                 if len(gaps) == 0: return 'Normal', 0, 0
-                promedio = gaps.mean() # Usar Mean
+                promedio = gaps.mean() 
                 gap = (fecha - fechas.max()).days
                 return calcular_estado_actual(gap, promedio), gap, promedio
 
@@ -453,7 +474,6 @@ def buscar_patrones_secuenciales(df_historial, max_longitud=3, nombre_sesion="Ge
 
 # --- FUNCIÓN PARA COMPORTAMIENTO DOBLE NORMAL ---
 def analizar_comportamiento_doble_normal(df_historial):
-    st.info("📊 **Análisis de Comportamiento del 'Doble Normal'**: Evaluando el estado completo de los números 'Doble Normal' a lo largo del historial.")
     df_fijo = df_historial[df_historial['Posicion'] == 'Fijo'].copy() 
     if df_fijo.empty: return pd.DataFrame()
 
@@ -471,7 +491,7 @@ def analizar_comportamiento_doble_normal(df_historial):
             if len(fechas_digito) == 0: es_doble_normal = False; break
             gaps = pd.Series(fechas_digito).diff().dt.days.dropna()
             if len(gaps) == 0: es_doble_normal = False; break
-            promedio_gap = gaps.mean() # Usar Mean
+            promedio_gap = gaps.mean()
             gap_actual = (fecha_actual - fechas_digito[-1]).days
             if calcular_estado_actual(gap_actual, promedio_gap) != 'Normal':
                 es_doble_normal = False; break
@@ -482,13 +502,12 @@ def analizar_comportamiento_doble_normal(df_historial):
             if not fechas_numero: continue
             gaps_num = pd.Series(fechas_numero).diff().dt.days.dropna()
             if len(gaps_num) == 0: continue
-            promedio_gap_num = gaps_num.mean() # Usar Mean
+            promedio_gap_num = gaps_num.mean()
             gap_actual_num = (fecha_actual - fechas_numero[-1]).days
             estado_num = calcular_estado_actual(gap_actual_num, promedio_gap_num)
             comportamiento[estado_num] += 1
             
     if total_doble_normal == 0:
-        st.warning("No se encontraron números 'Doble Normal' en el historial.")
         return pd.DataFrame()
 
     df_comportamiento = pd.DataFrame(list(comportamiento.items()), columns=['Estado del Número', 'Cantidad'])
@@ -523,7 +542,7 @@ def crear_tabla_historico_visual_fijo(df_historial, num_ultimos=30):
                     if len(df_num) == 0: return 'Normal', 0, 0
                     gaps = df_num.diff().dt.days.dropna()
                     if len(gaps) == 0: return 'Normal', 0, 0
-                    promedio = gaps.mean() # Usar Mean
+                    promedio = gaps.mean() 
                     ultima_fecha = df_num.max()
                     gap = (fecha_limite - ultima_fecha).days
                     estado = calcular_estado_actual(gap, promedio)
@@ -553,7 +572,7 @@ def crear_tabla_historico_visual_fijo(df_historial, num_ultimos=30):
                     if len(gaps_num) == 0:
                         estado_num = 'N/A'
                     else:
-                        promedio_gap_num = gaps_num.mean() # Usar Mean
+                        promedio_gap_num = gaps_num.mean()
                         ultima_fecha_num = df_num_hist['Fecha'].max()
                         gap_num = (fecha - ultima_fecha_num).days
                         estado_num = calcular_estado_actual(gap_num, promedio_gap_num)
@@ -581,7 +600,7 @@ def generar_estrategia_tendencia(df_historial, fecha_referencia):
         fechas_digito = df_fijo[df_fijo['Numero'].isin(numeros_con_digito)]['Fecha'].sort_values()
         gaps = fechas_digito.diff().dt.days.dropna()
         if len(gaps) > 0:
-            promedio_gap = gaps.mean() # Usar Mean
+            promedio_gap = gaps.mean()
             ultima_fecha = fechas_digito.max()
             gap_actual = (fecha_referencia - ultima_fecha).days
             estado = calcular_estado_actual(gap_actual, promedio_gap)
@@ -592,7 +611,7 @@ def generar_estrategia_tendencia(df_historial, fecha_referencia):
         fechas_num = df_fijo[df_fijo['Numero'] == n]['Fecha'].sort_values()
         gaps = fechas_num.diff().dt.days.dropna()
         if len(gaps) > 0:
-            promedio_gap = gaps.mean() # Usar Mean
+            promedio_gap = gaps.mean()
             ultima_fecha_num = fechas_num.max()
             gap_actual = (fecha_referencia - ultima_fecha_num).days
             estado = calcular_estado_actual(gap_actual, promedio_gap)
@@ -651,10 +670,9 @@ def main():
     
     # --- SECCIÓN AÑADIR SORTEO ---
     with st.sidebar.expander("📝 Agregar Nuevo Sorteo (Actualizar CSV)", expanded=False):
-        st.caption("Actualiza los resultados rápidamente. (Notas: En la nube los datos pueden perderse tras el reinicio).")
+        st.caption("Actualiza los resultados rápidamente.")
         
         fecha_nueva = st.date_input("Fecha del sorteo:", value=datetime.now().date(), format="DD/MM/YYYY")
-        
         sesion = st.radio("Sesión:", ["Mañana (M)", "Tarde (T)", "Noche (N)"], horizontal=True)
         
         col_a, col_b, col_c = st.columns(3)
@@ -667,12 +685,9 @@ def main():
         
         if st.button("💾 Guardar Sorteo", type="primary"):
             sesion_code = ""
-            if "Mañana" in sesion:
-                sesion_code = "M"
-            elif "Tarde" in sesion:
-                sesion_code = "T"
-            else:
-                sesion_code = "N"
+            if "Mañana" in sesion: sesion_code = "M"
+            elif "Tarde" in sesion: sesion_code = "T"
+            else: sesion_code = "N"
             
             fecha_str = fecha_nueva.strftime('%d/%m/%Y')
             linea_nueva = f"{fecha_str};{sesion_code};{fijo};{p1};{p2}\n"
@@ -692,11 +707,16 @@ def main():
                 time.sleep(1.5)
                 st.rerun()
                 
-            except PermissionError:
-                st.error("❌ Error de permisos: Asegúrate de que el archivo CSV no esté abierto en Excel.")
             except Exception as e:
                 st.error(f"❌ Error al guardar: {str(e)}")
 
+    st.sidebar.markdown("---")
+    
+    # --- CONFIGURACIÓN ANÁLISIS REBOTE ---
+    st.sidebar.subheader("⏳ Configuración Análisis Evento Rebote")
+    meses_rebote = st.sidebar.selectbox("Meses de historia para calcular ciclos de Rebote:", [3, 6, 12], index=0)
+
+    st.sidebar.markdown("---")
     debug_mode = st.sidebar.checkbox("🔍 Activar Modo Diagnóstico (CSV)", value=False)
     
     st.sidebar.subheader("📊 Modo de Análisis de Datos")
@@ -715,7 +735,6 @@ def main():
         fecha_referencia = pd.to_datetime(fecha_referencia).tz_localize(None)
     else:
         fecha_referencia = pd.Timestamp.now(tz=None)
-        st.sidebar.info(f"Analizando con la fecha de hoy: {fecha_referencia.strftime('%d/%m/%Y')}")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("🌡️ Modo de Temperatura de Dígitos (Almanaque)")
@@ -733,10 +752,6 @@ def main():
             st.sidebar.error("La fecha de inicio no puede ser posterior a la fecha de fin.")
     
     st.sidebar.markdown("---")
-    st.sidebar.subheader("🏆️ Análisis de Top Números")
-    top_n_candidatos = st.slider("Top N de Números Candidatos a mostrar:", min_value=1, max_value=20, value=5, step=1)
-
-    st.sidebar.markdown("---")
     if st.sidebar.button("🔄 Forzar Recarga de Datos"):
         st.cache_resource.clear()
         st.sidebar.success("¡Cache limpio! Recargando...")
@@ -745,17 +760,18 @@ def main():
     df_historial_completo = cargar_datos_geotodo(RUTA_CSV, debug_mode)
 
     if df_historial_completo is not None:
+        # --- FILTRADO CLAVE ---
         if "Mañana" in modo_sorteo:
-            df_analisis = df_historial_completo[df_historial_completo['Tipo_Sorteo'] == 'M'].copy()
+            df_analisis = df_historial_completo[(df_historial_completo['Tipo_Sorteo'] == 'M') & (df_historial_completo['Posicion'] == 'Fijo')].copy()
             titulo_app = f"Análisis de la Sesión: Mañana (M)"
         elif "Tarde" in modo_sorteo:
-            df_analisis = df_historial_completo[df_historial_completo['Tipo_Sorteo'] == 'T'].copy()
+            df_analisis = df_historial_completo[(df_historial_completo['Tipo_Sorteo'] == 'T') & (df_historial_completo['Posicion'] == 'Fijo')].copy()
             titulo_app = f"Análisis de la Sesión: Tarde (T)"
         elif "Noche" in modo_sorteo:
-            df_analisis = df_historial_completo[df_historial_completo['Tipo_Sorteo'] == 'N'].copy()
+            df_analisis = df_historial_completo[(df_historial_completo['Tipo_Sorteo'] == 'N') & (df_historial_completo['Posicion'] == 'Fijo')].copy()
             titulo_app = f"Análisis de la Sesión: Noche (N)"
         else: 
-            df_analisis = df_historial_completo.copy()
+            df_analisis = df_historial_completo[df_historial_completo['Posicion'] == 'Fijo'].copy()
             titulo_app = "Análisis General de Sorteos"
         
         st.title(f"🎲 {titulo_app}")
@@ -775,7 +791,7 @@ def main():
             ultimo_sorteo_N = df_analisis[df_analisis['Tipo_Sorteo'] == 'N'].iloc[-1]
             st.sidebar.info(f"Último sorteo **Noche**: {ultimo_sorteo_N['Fecha'].strftime('%d/%m/%Y')} (Fijo: {ultimo_sorteo_N['Numero']})")
         
-        frecuencia_numeros_historica_general = df_historial_completo['Numero'].value_counts().reset_index()
+        frecuencia_numeros_historica_general = df_historial_completo[df_historial_completo['Posicion'] == 'Fijo']['Numero'].value_counts().reset_index()
         frecuencia_numeros_historica_general.columns = ['Numero', 'Total_Salidas_Historico']
         df_clasificacion_general = crear_mapa_de_calor_numeros(frecuencia_numeros_historica_general)
         
@@ -792,12 +808,42 @@ def main():
         fecha_inicio_rango_safe = pd.to_datetime(fecha_inicio_rango).tz_localize(None) if fecha_inicio_rango else None
         fecha_fin_rango_safe = pd.to_datetime(fecha_fin_rango).tz_localize(None) if fecha_fin_rango else None
         
-        df_oportunidad_decenas, df_oportunidad_unidades, top_candidatos, mapa_temp_decenas, mapa_temp_unidades = analizar_oportunidad_por_digito(
+        # Modificado para no calcular Top Candidatos combinados
+        df_oportunidad_decenas, df_oportunidad_unidades, mapa_temp_decenas, mapa_temp_unidades = analizar_oportunidad_por_digito(
             df_analisis, df_estados_completos, historicos_numero, 
-            modo_temperatura, fecha_inicio_rango_safe, fecha_fin_rango_safe,
-            top_n_candidatos
+            modo_temperatura, fecha_inicio_rango_safe, fecha_fin_rango_safe
         )
         
+        # --- NUEVA SECCIÓN: ANÁLISIS DE REBOTE TEMPORAL ---
+        st.markdown("---")
+        st.header("⏳ Análisis de Evento 'Rebote' (Ciclos Temporales)")
+        st.markdown("Este análisis mide **cuánto tiempo** pasa normalmente entre un evento de rebote (Corridoayer = Fijohoy) y el siguiente.")
+        
+        datos_rebote = analizar_evento_rebote_temporal(df_historial_completo, fecha_referencia, meses_rebote)
+        
+        col_evento_1, col_evento_2, col_evento_3 = st.columns(3)
+        with col_evento_1:
+            st.metric("Estado del Evento Hoy", datos_rebote['estado'])
+        with col_evento_2:
+            if datos_rebote['dias_sin_evento'] is not None:
+                st.metric("Días desde el último Rebote", datos_rebote['dias_sin_evento'])
+            else:
+                st.metric("Días desde el último Rebote", "N/A")
+        with col_evento_3:
+            if datos_rebote['promedio_dias'] is not None:
+                st.metric("Promedio Histórico (Ciclo)", f"{datos_rebote['promedio_dias']} días")
+            else:
+                st.metric("Promedio Histórico", "N/A")
+
+        if datos_rebote['estado'] != 'Insuficientes Datos':
+            st.info(f"📝 **Interpretación:** Históricamente, ocurre un rebote cada {datos_rebote['promedio_dias']} días en promedio. Llevamos {datos_rebote['dias_sin_evento']} días sin uno.")
+        else:
+            st.warning("No hay suficientes datos históricos en el rango seleccionado para calcular el ciclo de rebote.")
+
+        # --- SECCIÓN: LISTADO POR DECENAS ---
+        st.markdown("---")
+        mostrar_listado_decenas_detalle(df_estados_completos)
+
         # --- SECCIÓN 1: NÚMEROS CON OPORTUNIDAD ---
         st.markdown("---")
         st.header("🎯 Números con Oportunidad (Debidos) por Grupo")
@@ -939,45 +985,7 @@ def main():
         with col_uni:
             st.subheader("📊 Oportunidad por Unidad")
             st.dataframe(df_oportunidad_unidades.sort_values(by='Puntuación Total', ascending=False), width='stretch', hide_index=True)
-
-        st.markdown("---")
-        st.subheader(f"🏆 Top {top_n_candidatos} Números Candidatos (Puntuación Combinada)")
-        st.dataframe(top_candidatos, width='stretch', hide_index=True)
         
-        # --- SECCIÓN 5: MAPA DE CALOR POSICIONAL ---
-        st.markdown("---")
-        st.header("🗺️ Mapa de Calor Posicional")
-        
-        df_mapa_calor = crear_mapa_calor_posicional(mapa_temp_decenas, mapa_temp_unidades)
-        df_hot_cold, df_cold_hot, df_hot_hot, df_cold_cold = analizar_combinaciones_extremas(mapa_temp_decenas, mapa_temp_unidades, df_estados_completos)
-        
-        st.subheader("Mapa de Calor de Combinaciones Posicionales")
-        st.markdown("**Cómo leer este mapa:** - **Eje X:** Dígito de la Decena (0-9) - **Eje Y:** Dígito de la Unidad (0-9) - **Colores:** Representan la combinación de temperatura.")
-        
-        cmap = sns.color_palette("RdYlGn_r", as_cmap=True)
-        fig, ax = plt.subplots(figsize=(12, 10))
-        sns.heatmap(df_mapa_calor, annot=True, fmt=".0f", cmap=cmap, center=22, xticklabels=range(10), yticklabels=range(10), cbar_kws={'label': 'Puntuación de Temperatura Combinada'})
-        ax.set_xlabel('Dígito de la Decena'); ax.set_ylabel('Dígito de la Unidad'); ax.set_title('Mapa de Calor Posicional')
-        st.pyplot(fig)
-        
-        st.markdown("---")
-        st.subheader("📊 Análisis de Combinaciones Extremas")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.subheader("🔥🧊 Caliente-Frío (Máxima Oportunidad)"); st.markdown("Números donde la decena está muy caliente y la unidad muy fría.")
-            if not df_hot_cold.empty: st.dataframe(df_hot_cold, width='stretch', hide_index=True)
-            else: st.warning("No hay combinaciones Caliente-Frío.")
-            st.markdown("---"); st.subheader("🔥🔥 Doble Caliente (Alta Probabilidad)"); st.markdown("Números donde ambas posiciones están muy calientes.")
-            if not df_hot_hot.empty: st.dataframe(df_hot_hot, width='stretch', hide_index=True)
-            else: st.warning("No hay combinaciones Doble Caliente.")
-        with col2:
-            st.subheader("🧊🔥 Frío-Caliente (Segunda Oportunidad)"); st.markdown("Números donde la unidad está muy caliente y la decena muy fría.")
-            if not df_cold_hot.empty: st.dataframe(df_cold_hot, width='stretch', hide_index=True)
-            else: st.warning("No hay combinaciones Frío-Caliente.")
-            st.markdown("---"); st.subheader("🧊🧊 Doble Frío (Posible Sorpresa)"); st.markdown("Números donde ambas posiciones están muy frías.")
-            if not df_cold_cold.empty: st.dataframe(df_cold_cold, width='stretch', hide_index=True)
-            else: st.write("No hay combinaciones Doble Frío.")
-
         # --- SECCIÓN 6: PATRONES SECUENCIALES ---
         st.markdown("---")
         st.header("🔍 Búsqueda de Patrones Secuenciales")
@@ -1128,10 +1136,10 @@ def main():
                 freq_actual = df_analisis[df_analisis['Numero'] == num].shape[0]
                 fila[f'Frecuencia en {modo_sorteo.split(":")[-1].strip()}'] = freq_actual
                 for key in otras_sesiones:
-                    df_otra_sesion = df_historial_completo[df_historial_completo['Tipo_Sorteo'] == key]
+                    df_otra_sesion = df_historial_completo[(df_historial_completo['Tipo_Sorteo'] == key) & (df_historial_completo['Posicion'] == 'Fijo')]
                     freq_otra = df_otra_sesion[df_otra_sesion['Numero'] == num].shape[0]
                     fila[f'Frecuencia en {key}'] = freq_otra
-                freq_general = df_historial_completo[df_historial_completo['Numero'] == num].shape[0]
+                freq_general = df_historial_completo[df_historial_completo['Posicion'] == 'Fijo']['Numero'].value_counts().get(num, 0)
                 fila['Frecuencia General'] = freq_general
                 temp_general = df_clasificacion_general[df_clasificacion_general['Numero'] == num]['Temperatura'].iloc[0]
                 fila['Temperatura General'] = temp_general
