@@ -6,18 +6,19 @@ import os
 import time
 from collections import Counter
 from datetime import datetime, timedelta
+from dateutil.relativedelta import relativedelta
 
 # --- CONFIGURACIÓN DE LA RUTA_RELATIVA ---
 RUTA_CSV = 'Geotodo.csv' 
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
-    page_title="Geotodo - Suite Completa",
+    page_title="Geotodo - Suite Ultimate",
     page_icon="🎲",
     layout="wide"
 )
 
-st.title("🎲 Geotodo - Suite de Análisis Avanzado")
+st.title("🎲 Geotodo - Suite de Análisis Avanzado (Corregido)")
 
 # --- FUNCIÓN PARA CARGAR DATOS ---
 @st.cache_resource
@@ -26,424 +27,328 @@ def cargar_datos_geotodo(_ruta_csv):
         if not os.path.exists(_ruta_csv):
             st.error(f"❌ Error: No se encontró el archivo {_ruta_csv}.")
             st.stop()
-        
         df = pd.read_csv(_ruta_csv, sep=';', encoding='latin-1')
-        
-        df.rename(columns={
-            'Fecha': 'Fecha',
-            'Tarde/Noche': 'Tipo_Sorteo', 
-            'Fijo': 'Fijo',
-            '1er Corrido': 'Primer_Corrido',
-            '2do Corrido': 'Segundo_Corrido'
-        }, inplace=True)
-        
+        df.rename(columns={'Fecha': 'Fecha', 'Tarde/Noche': 'Tipo_Sorteo', 'Fijo': 'Fijo', '1er Corrido': 'Primer_Corrido', '2do Corrido': 'Segundo_Corrido'}, inplace=True)
         df['Fecha'] = pd.to_datetime(df['Fecha'], dayfirst=True, errors='coerce')
         df.dropna(subset=['Fecha'], inplace=True)
-        
-        # Mapeo para Geotodo (Incluye Mañana)
-        df['Tipo_Sorteo'] = df['Tipo_Sorteo'].astype(str).str.strip().str.upper().map({
-            'MAÑANA': 'M', 'M': 'M', 'MANANA': 'M',
-            'TARDE': 'T', 'T': 'T',
-            'NOCHE': 'N', 'N': 'N'
-        }).fillna('OTRO')
-
+        df['Tipo_Sorteo'] = df['Tipo_Sorteo'].astype(str).str.strip().str.upper().map({'MAÑANA': 'M', 'M': 'M', 'MANANA': 'M', 'TARDE': 'T', 'T': 'T', 'NOCHE': 'N', 'N': 'N'}).fillna('OTRO')
         df_fijos = df[['Fecha', 'Tipo_Sorteo', 'Fijo']].copy()
         df_fijos = df_fijos.rename(columns={'Fijo': 'Numero'})
         df_fijos['Numero'] = pd.to_numeric(df_fijos['Numero'], errors='coerce').astype(int)
-        
-        # Orden cronológico estricto
         draw_order_map = {'M': 0, 'T': 1, 'N': 2}
         df_fijos['draw_order'] = df_fijos['Tipo_Sorteo'].map(draw_order_map).fillna(3)
         df_fijos['sort_key'] = df_fijos['Fecha'] + pd.to_timedelta(df_fijos['draw_order'], unit='h')
         df_fijos = df_fijos.sort_values(by='sort_key').reset_index(drop=True)
-        
         return df_fijos
     except Exception as e:
         st.error(f"Error cargando datos: {e}")
         st.stop()
 
-# --- FUNCIÓN 1: PATRONES (NÚMEROS) ---
+# --- FUNCIÓN 1: PATRONES ---
 def analizar_siguientes(df_fijos, numero_busqueda, ventana_sorteos):
-    indices_disparador = df_fijos[df_fijos['Numero'] == numero_busqueda].index.tolist()
-    if not indices_disparador: return None, 0 
-    
-    lista_siguientes = []
-    total_analizado = 0
-    for idx in indices_disparador:
-        inicio = idx + 1
-        fin = idx + ventana_sorteos + 1
-        if inicio >= len(df_fijos): continue
-        ventana = df_fijos.iloc[inicio:fin]['Numero'].tolist()
-        lista_siguientes.extend(ventana)
-        total_analizado += 1
-        
-    conteo = Counter(lista_siguientes)
-    df_res = pd.DataFrame.from_dict(conteo, orient='index', columns=['Frecuencia'])
-    df_res.index.name = 'Número'
-    df_res.reset_index(inplace=True)
-    df_res = df_res[df_res['Frecuencia'] > 0]
-    df_res = df_res.sort_values(by='Frecuencia', ascending=False).reset_index(drop=True)
-    
-    total_slots = len(lista_siguientes)
-    df_res['Probabilidad (%)'] = (df_res['Frecuencia'] / total_slots * 100).round(2) if total_slots > 0 else 0
-    df_res['Número'] = df_res['Número'].apply(lambda x: f"{x:02d}")
-    return df_res, total_analizado
+    indices = df_fijos[df_fijos['Numero'] == numero_busqueda].index.tolist()
+    if not indices: return None, 0 
+    lista_s = []
+    for idx in indices:
+        i = idx + 1; f = idx + ventana_sorteos + 1
+        if i < len(df_fijos): lista_s.extend(df_fijos.iloc[i:f]['Numero'].tolist())
+    c = Counter(lista_s)
+    r = pd.DataFrame.from_dict(c, orient='index', columns=['Frecuencia'])
+    r['Probabilidad (%)'] = (r['Frecuencia'] / sum(lista_s) * 100).round(2) if lista_s else 0
+    r['Número'] = r.index.astype(int).apply(lambda x: f"{x:02d}")
+    return r.sort_values('Frecuencia', ascending=False), len(indices)
 
-# --- FUNCIÓN 2: ALMANAQUE ---
-def analizar_almanaque(df_fijos, quincena, meses_atras):
-    fecha_fin = datetime.now()
-    fecha_inicio = fecha_fin - pd.DateOffset(months=meses_atras)
-    df_filtrado = df_fijos[(df_fijos['Fecha'] >= fecha_inicio) & (df_fijos['Fecha'] <= fecha_fin)].copy()
-    if df_filtrado.empty: return None, None, None
-    
-    df_filtrado['Dia'] = df_filtrado['Fecha'].dt.day
-    if quincena == "1ra Quincena (Días 1 al 15)":
-        df_filtrado = df_filtrado[df_filtrado['Dia'] <= 15]
-    else:
-        df_filtrado = df_filtrado[df_filtrado['Dia'] > 15]
-    
-    if df_filtrado.empty: return None, None, None
-
-    df_filtrado['Decena'] = df_filtrado['Numero'] // 10
-    df_filtrado['Unidad'] = df_filtrado['Numero'] % 10
-    
-    cnt_dec = df_filtrado['Decena'].value_counts().reindex(range(10), fill_value=0)
-    cnt_uni = df_filtrado['Unidad'].value_counts().reindex(range(10), fill_value=0)
-    
-    return df_filtrado, cnt_dec, cnt_uni
-
-# --- FUNCIÓN 3: GENERADOR DE PROPUESTA INTELIGENTE ---
-def generar_sugerencia_tendencia(df_fijos, dias_tendencia, dias_minimo_gap):
+# --- FUNCIÓN 2: ALMANAQUE (CON PERSISTENCIA DE PERFIL Y CORRECCIÓN DE ERROR) ---
+def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     fecha_hoy = datetime.now()
-    fecha_inicio_tendencia = fecha_hoy - timedelta(days=dias_tendencia)
+    bloques_validos = []
+    nombres_bloques = []
     
-    df_tendencia = df_fijos[df_fijos['Fecha'] >= fecha_inicio_tendencia].copy()
-    
-    if df_tendencia.empty:
-        return pd.DataFrame()
-    
-    df_tendencia['Decena'] = df_tendencia['Numero'] // 10
-    df_tendencia['Unidad'] = df_tendencia['Numero'] % 10
-    
-    top_decenas = df_tendencia['Decena'].value_counts().head(3).index.tolist()
-    top_unidades = df_tendencia['Unidad'].value_counts().head(3).index.tolist()
-    
-    st.info(f"🔥 Tendencia Detectada (Últimos {dias_tendencia} días): Decenas {top_decenas} | Unidades {top_unidades}")
-    
-    candidatos = []
-    for d in top_decenas:
-        for u in top_unidades:
-            candidatos.append(d * 10 + u)
-            
-    resultados = []
-    
-    for num in candidatos:
-        df_num = df_fijos[df_fijos['Numero'] == num]
-        
-        if df_num.empty:
-            gap = (fecha_hoy - df_fijos['Fecha'].min()).days
-            ultima_fecha = "Nunca"
-        else:
-            ultima_fecha = df_num['Fecha'].max()
-            gap = (fecha_hoy - ultima_fecha).days
-        
-        if gap >= dias_minimo_gap:
-            decena = num // 10
-            unidad = num % 10
-            estado = "⚡ Muy Oportuno" if gap > (dias_minimo_gap * 1.5) else "✅ Oportuno"
-            
-            resultados.append({
-                'Número': f"{num:02d}",
-                'Gap (Días)': gap,
-                'Última Salida': ultima_fecha.strftime('%d/%m/%Y'),
-                'Combinación': f"Dec {decena} + Uni {unidad}",
-                'Estado': estado
-            })
-            
-    return pd.DataFrame(resultados).sort_values(by='Gap (Días)', ascending=False).reset_index(drop=True)
+    # 1. Generar Bloques
+    for offset in range(1, meses_atras + 1):
+        f_obj = fecha_hoy - relativedelta(months=offset)
+        try:
+            f_i = datetime(f_obj.year, f_obj.month, dia_inicio)
+            f_f = datetime(f_obj.year, f_obj.month, dia_fin)
+            if f_i > f_f: continue
+            df_b = df_fijos[(df_fijos['Fecha'] >= f_i) & (df_fijos['Fecha'] <= f_f)]
+            if not df_b.empty:
+                bloques_validos.append(df_b)
+                nombres_bloques.append(f"{f_i.strftime('%d/%m')}-{f_f.strftime('%d/%m')}")
+        except: continue
 
-# --- FUNCIÓN 4: BÚSQUEDA DE SECUENCIA DE DÍGITOS (CON FECHAS) ---
-def buscar_secuencia_digitos(df_fijos, secuencia_input, tipo_digito):
-    """
-    Busca secuencia y devuelve el dígito siguiente + ejemplos de números CON FECHA.
-    """
+    if not bloques_validos: return None, "Sin datos.", None, None, None, None, None, None, None, None, None, None
+        
+    df_total = pd.concat(bloques_validos)
+    df_total['Decena'] = df_total['Numero'] // 10
+    df_total['Unidad'] = df_total['Numero'] % 10
+    
+    # 2. Clasificación Global
+    cnt_d = df_total['Decena'].value_counts().reindex(range(10), fill_value=0)
+    cnt_u = df_total['Unidad'].value_counts().reindex(range(10), fill_value=0)
+    
+    def clasificar(serie):
+        df_t = serie.sort_values(ascending=False).reset_index()
+        df_t.columns = ['Digito', 'Frecuencia']
+        conds = [(df_t.index < 3), (df_t.index < 6)]
+        vals = ['🔥 Caliente', '🟡 Tibio']
+        df_t['Estado'] = np.select(conds, vals, default='🧊 Frío')
+        mapa = {r['Digito']: r['Estado'] for _, r in df_t.iterrows()}
+        return df_t, mapa
+
+    df_dec, mapa_d = clasificar(cnt_d)
+    df_uni, mapa_u = clasificar(cnt_u)
+    
+    # 3. Matriz 3x3
+    hot_d = df_dec[df_dec['Estado']=='🔥 Caliente']['Digito'].tolist()
+    hot_u = df_uni[df_uni['Estado']=='🔥 Caliente']['Digito'].tolist()
+    lista_3x3 = [{'Número': f"{d*10+u:02d}", 'Veces': len(df_total[df_total['Numero']==d*10+u])} for d in hot_d for u in hot_u]
+    df_3x3 = pd.DataFrame(lista_3x3).sort_values('Veces', ascending=False)
+
+    # 4. Ranking General y Tendencia
+    ranking = []
+    for n, v in df_total['Numero'].value_counts().items():
+        d = n//10; u=n%10
+        p = f"{mapa_d.get(d,'?')} + {mapa_u.get(u,'?')}"
+        ranking.append({'Número': f"{n:02d}", 'Frecuencia': v, 'Perfil': p})
+    df_rank = pd.DataFrame(ranking).sort_values('Frecuencia', ascending=False)
+    
+    tend = df_rank['Perfil'].value_counts().reset_index()
+    tend.columns = ['Perfil', 'Frecuencia']
+    top_p = tend.iloc[0]['Perfil'] if not tend.empty else "N/A"
+
+    # 5. Generar Sugerencias (tend_nums) basado en el top_p
+    tend_nums = []
+    if top_p != "N/A" and " + " in top_p:
+        p_dec, p_uni = top_p.split(" + ")
+        decs_obj = df_dec[df_dec['Estado'] == p_dec]['Digito'].tolist()
+        unis_obj = df_uni[df_uni['Estado'] == p_uni]['Digito'].tolist()
+        for d in decs_obj:
+            for u in unis_obj:
+                n = d*10 + u
+                tend_nums.append({'Número': f"{n:02d}", 'Sugerencia (Perfil Tendencia)': f"{p_dec} x {p_uni}"})
+    df_tend_nums = pd.DataFrame(tend_nums)
+
+    # 6. Persistencia de NÚMERO
+    pers_num = []
+    nums_unicos = df_total['Numero'].unique()
+    for n in nums_unicos:
+        c = sum(1 for b in bloques_validos if n in b['Numero'].values)
+        if c == len(bloques_validos):
+            # Buscar perfil con seguridad
+            perfil_val = df_rank[df_rank['Número']==f"{n:02d}"]['Perfil']
+            p = perfil_val.values[0] if not perfil_val.empty else "Desconocido"
+            pers_num.append({'Número': f"{n:02d}", 'Perfil': p})
+    
+    # --- CORRECCIÓN AQUÍ: Manejo de lista vacía para evitar KeyError ---
+    if pers_num:
+        df_pers_num = pd.DataFrame(pers_num).sort_values('Número').reset_index(drop=True)
+    else:
+        df_pers_num = pd.DataFrame(columns=['Número', 'Perfil']) # Crear estructura vacía correcta
+
+    # 7. Persistencia de PERFIL
+    sets_perfiles = []
+    for df_b in bloques_validos:
+        perfiles_en_bloque = set()
+        for row in df_b.itertuples():
+            d = row.Numero // 10
+            u = row.Numero % 10
+            ed = mapa_d.get(d, '?')
+            eu = mapa_u.get(u, '?')
+            perfiles_en_bloque.add(f"{ed} + {eu}")
+        sets_perfiles.append(perfiles_en_bloque)
+    
+    persistentes_perfiles = set.intersection(*sets_perfiles) if sets_perfiles else set()
+        
+    # Retornamos 11 valores
+    return df_total, df_dec, df_uni, df_3x3, df_rank, nombres_bloques, df_pers_num, tend, top_p, df_tend_nums, persistentes_perfiles
+
+# --- FUNCIÓN 3: PROPUESTA ---
+def generar_sugerencia(df, dias, gap):
+    fh = datetime.now()
+    df_t = df[df['Fecha'] >= fh - timedelta(days=dias)].copy()
+    if df_t.empty: return pd.DataFrame()
+    df_t['Dec'] = df_t['Numero']//10; df_t['Uni'] = df_t['Numero']%10
+    td = df_t['Dec'].value_counts().head(3).index.tolist()
+    tu = df_t['Uni'].value_counts().head(3).index.tolist()
+    res = []
+    for n in [d*10+u for d in td for u in tu]:
+        df_n = df[df['Numero']==n]
+        if not df_n.empty:
+            g = (fh - df_n['Fecha'].max()).days
+            if g >= gap: res.append({'Número': f"{n:02d}", 'Gap': g, 'Estado': "⚡ Muy" if g>gap*1.5 else "✅ Op"})
+    return pd.DataFrame(res).sort_values('Gap', ascending=False)
+
+# --- FUNCIÓN 4: SECUENCIA ---
+def buscar_seq(df, part, type_, seq):
     try:
-        patron = [int(x.strip()) for x in secuencia_input.replace(',', ' ').split() if x.strip().isdigit()]
-    except:
-        return None, "Error en el formato. Usa números del 0 al 9 separados por espacios o comas."
+        p = [x.strip().upper() for x in seq.replace(',', ' ').split() if x.strip()]
+    except: return None, "Error."
+    if len(p)==0 or len(p)>5: return None, "Inválido."
+    if type_=='digito': v=set(range(10))
+    elif type_=='paridad': v={'P','I'}
+    elif type_=='altura': v={'A','B'}
+    else: return None, "Desconocido."
+    try:
+        if type_=='digito':
+            p = [int(x) for x in p]
+            if any(x not in v for x in p): return None, "0-9."
+        else:
+            if any(x not in v for x in p): return None, f"Usa {', '.join(v)}."
+    except: return None, "Conv."
     
-    if len(patron) == 0:
-        return None, "La secuencia está vacía."
-    if len(patron) > 5:
-        return None, "La secuencia máxima permitida es de 5 dígitos."
-    if any(x < 0 or x > 9 for x in patron):
-        return None, "Los dígitos deben estar entre 0 y 9."
+    l = []
+    for x in df['Numero']:
+        val = x//10 if part=='Decena' else x%10
+        if type_=='digito': l.append(val)
+        elif type_=='paridad': l.append('P' if val%2==0 else 'I')
+        elif type_=='altura': l.append('A' if val>=5 else 'B')
+    lp = len(p); dat = {}
+    for i in range(len(l)-lp):
+        if l[i:i+lp]==p:
+            sig = l[i+lp]; r = df.iloc[i+lp]
+            e = f"{r['Numero']:02d} ({r['Fecha'].strftime('%d/%m/%Y')})"
+            if sig not in dat: dat[sig] = {'c':0, 'e':[]}
+            dat[sig]['c']+=1
+            if len(dat[sig]['e'])<3 and e not in dat[sig]['e']: dat[sig]['e'].append(e)
+    if not dat: return None, "No."
+    rows = [{'Siguiente':k, 'Frecuencia':v['c'], 'Ejemplos':", ".join(v['e']), 'Prob':0} for k,v in dat.items()]
+    df_r = pd.DataFrame(rows)
+    df_r['Prob'] = (df_r['Frecuencia']/df_r['Frecuencia'].sum()*100).round(2)
+    return df_r.sort_values('Frecuencia', ascending=False), None
 
-    # Extraer lista histórica de dígitos
-    if tipo_digito == "Decena":
-        lista_historica = (df_fijos['Numero'] // 10).tolist()
-    else:
-        lista_historica = (df_fijos['Numero'] % 10).tolist()
-        
-    long_patron = len(patron)
-    
-    datos_resultado = {}
-    
-    for i in range(len(lista_historica) - long_patron):
-        sub_lista = lista_historica[i : i + long_patron]
-        if sub_lista == patron:
-            siguiente_digito = lista_historica[i + long_patron]
-            
-            # Extraer información de la fila
-            row_evento = df_fijos.iloc[i + long_patron]
-            numero_completo = row_evento['Numero']
-            fecha_evento = row_evento['Fecha']
-            fecha_str = fecha_evento.strftime('%d/%m/%Y')
-            
-            if siguiente_digito not in datos_resultado:
-                datos_resultado[siguiente_digito] = {'count': 0, 'ejemplos': []}
-            
-            datos_resultado[siguiente_digito]['count'] += 1
-            
-            # Guardar hasta 3 ejemplos únicos con formato "Número (Fecha)"
-            if len(datos_resultado[siguiente_digito]['ejemplos']) < 3:
-                formato_ejemplo = f"{numero_completo:02d} ({fecha_str})"
-                if formato_ejemplo not in datos_resultado[siguiente_digito]['ejemplos']:
-                    datos_resultado[siguiente_digito]['ejemplos'].append(formato_ejemplo)
-            
-    if not datos_resultado:
-        return None, f"El patrón {patron} no se ha repetido consecutivamente en el historial."
-    
-    rows = []
-    for digito, data in datos_resultado.items():
-        rows.append({
-            'Dígito Siguiente': digito,
-            'Frecuencia': data['count'],
-            'Ejemplos Históricos (Núm + Fecha)': ", ".join(data['ejemplos']),
-            'Probabilidad (%)': 0
-        })
-        
-    df_res = pd.DataFrame(rows)
-    total = df_res['Frecuencia'].sum()
-    df_res['Probabilidad (%)'] = (df_res['Frecuencia'] / total * 100).round(2)
-    df_res = df_res.sort_values(by='Frecuencia', ascending=False).reset_index(drop=True)
-    
-    return df_res, None
-
-# --- EJECUCIÓN DE LA APP ---
+# --- MAIN ---
 def main():
-    df_fijos = cargar_datos_geotodo(RUTA_CSV)
-    
-    st.sidebar.header("⚙️ Panel de Control")
-    
-    # --- INFO DE DATOS ---
-    with st.sidebar.expander("📂 Información del Archivo", expanded=True):
-        df_manana_info = df_fijos[df_fijos['Tipo_Sorteo'] == 'M']
-        df_tarde_info = df_fijos[df_fijos['Tipo_Sorteo'] == 'T']
-        df_noche_info = df_fijos[df_fijos['Tipo_Sorteo'] == 'N']
-        
-        st.markdown("**Últimos Sorteos Cargados (Geotodo):**")
-        
-        if not df_manana_info.empty:
-            ultima_manana = df_manana_info['Fecha'].max()
-            num_manana = df_manana_info[df_manana_info['Fecha'] == ultima_manana]['Numero'].values[0]
-            st.metric("🌅 Última Mañana", f"{ultima_manana.strftime('%d/%m/%Y')}", delta=f"Fijo: {num_manana:02d}")
-        else:
-            st.warning("Sin datos de Mañana")
+    df = cargar_datos_geotodo(RUTA_CSV)
+    st.sidebar.header("⚙️ Panel")
+    with st.sidebar.expander("📂 Datos", expanded=True):
+        def m(l, i, ic):
+            if not l.empty:
+                f = l['Fecha'].max(); n = l[l['Fecha']==f]['Numero'].values[0]
+                st.metric(f"{ic} {i}", f"{f.strftime('%d/%m')}", delta=f"{n:02d}")
+        m(df[df['Tipo_Sorteo']=='M'], "Mañana", "🌅")
+        m(df[df['Tipo_Sorteo']=='T'], "Tarde", "🌞")
+        m(df[df['Tipo_Sorteo']=='N'], "Noche", "🌙")
 
-        if not df_tarde_info.empty:
-            ultima_tarde = df_tarde_info['Fecha'].max()
-            num_tarde = df_tarde_info[df_tarde_info['Fecha'] == ultima_tarde]['Numero'].values[0]
-            st.metric("🌞 Última Tarde", f"{ultima_tarde.strftime('%d/%m/%Y')}", delta=f"Fijo: {num_tarde:02d}")
-        else:
-            st.warning("Sin datos de Tarde")
-
-        if not df_noche_info.empty:
-            ultima_noche = df_noche_info['Fecha'].max()
-            num_noche = df_noche_info[df_noche_info['Fecha'] == ultima_noche]['Numero'].values[0]
-            st.metric("🌙 Última Noche", f"{ultima_noche.strftime('%d/%m/%Y')}", delta=f"Fijo: {num_noche:02d}")
-        else:
-            st.warning("Sin datos de Noche")
-
-    # --- AGREGAR SORTEO ---
-    with st.sidebar.expander("📝 Agregar Nuevo Sorteo", expanded=False):
-        fecha_nueva = st.date_input("Fecha:", value=datetime.now().date(), format="DD/MM/YYYY", label_visibility="collapsed")
-        # Geotodo tiene 3 sesiones
-        sesion = st.radio("Sesión:", ["Mañana (M)", "Tarde (T)", "Noche (N)"], horizontal=True, label_visibility="collapsed")
-        
-        col_a, col_b = st.columns(2)
-        with col_a:
-            fijo = st.number_input("Fijo", min_value=0, max_value=99, value=0, format="%02d", label_visibility="collapsed")
-        with col_b:
-            c1 = st.number_input("1er Corr.", min_value=0, max_value=99, value=0, format="%02d", label_visibility="collapsed")
-        p2 = st.number_input("2do Corr.", min_value=0, max_value=99, value=0, format="%02d", label_visibility="collapsed")
-        
-        if st.button("💾 Guardar", type="primary", use_container_width=True):
-            sesion_code = sesion.split('(')[1].replace(')', '') 
-            fecha_str = fecha_nueva.strftime('%d/%m/%Y')
-            linea_nueva = f"{fecha_str};{sesion_code};{fijo};{c1};{p2}\n"
+    with st.sidebar.expander("📝 Agregar", expanded=False):
+        f = st.date_input("Fecha:", datetime.now().date(), format="DD/MM/YYYY", label_visibility="collapsed")
+        s = st.radio("Sesión:", ["Mañana (M)", "Tarde (T)", "Noche (N)"], horizontal=True, label_visibility="collapsed")
+        c1, c2 = st.columns(2)
+        with c1: fj = st.number_input("Fijo", 0, 99, 0, format="%02d", label_visibility="collapsed")
+        with c2: c1v = st.number_input("1er", 0, 99, 0, format="%02d", label_visibility="collapsed")
+        p2 = st.number_input("2do", 0, 99, 0, format="%02d", label_visibility="collapsed")
+        if st.button("💾", type="primary", use_container_width=True):
+            cd = s.split('(')[1].replace(')', '')
             try:
-                with open(RUTA_CSV, 'a', encoding='latin-1') as f:
-                    f.write(linea_nueva)
-                st.success("✅ Guardado. Recargando...")
-                st.cache_resource.clear()
-                time.sleep(2)
-                st.rerun()
-            except Exception as e:
-                st.error(f"Error: {e}")
+                with open(RUTA_CSV, 'a', encoding='latin-1') as file: file.write(f"{f.strftime('%d/%m/%Y')};{cd};{fj};{c1v};{p2}\n")
+                st.success("Ok"); time.sleep(1); st.rerun()
+            except Exception as e: st.error(e)
 
-    # --- BOTÓN FORZAR RECARGA ---
     st.sidebar.markdown("---")
-    if st.sidebar.button("🔄 Forzar Recarga de Datos"):
-        st.cache_resource.clear()
-        st.sidebar.success("Caché limpio. Recargando...")
-        time.sleep(1)
-        st.rerun()
+    if st.sidebar.button("🔄"): st.cache_resource.clear(); st.rerun()
+    st.sidebar.subheader("🎲 Modo")
+    modo = st.sidebar.radio("Filtro:", ["General", "Mañana", "Tarde", "Noche"])
+    if "Mañana" in modo: dfa = df[df['Tipo_Sorteo']=='M'].copy(); t="Mañana"
+    elif "Tarde" in modo: dfa = df[df['Tipo_Sorteo']=='T'].copy(); t="Tarde"
+    elif "Noche" in modo: dfa = df[df['Tipo_Sorteo']=='N'].copy(); t="Noche"
+    else: dfa = df.copy(); t="General"
+    if dfa.empty: st.stop()
+    
+    tabs = st.tabs(["🔍 Patrones", "📅 Almanaque Ultimate", "🧠 Propuesta", "🔗 Secuencia"])
 
-    # --- SELECCIÓN DE SESIÓN ---
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎲 Filtro de Análisis")
-    modo_sesion = st.sidebar.radio("Modo:", ["General", "Solo Mañana (M)", "Solo Tarde (T)", "Solo Noche (N)"])
+    # 1. PATRONES
+    with tabs[0]:
+        st.subheader(f"Patrones: {t}")
+        c1, c2 = st.columns(2)
+        with c1: n = st.number_input("Disparador:", 0, 99, 40, format="%02d")
+        with c2: v = st.slider("Ventana:", 1, 30, 15)
+        if st.button("🔍", key="b1"): st.session_state['sb1'] = True
+        if st.session_state.get('sb1'):
+            r, tot = analizar_siguientes(dfa, n, v)
+            if r is None: st.error("No salió.")
+            else: st.dataframe(r.head(20), column_config={"Frecuencia": st.column_config.ProgressColumn("Frecuencia", format="%d", min_value=0, max_value=int(r['Frecuencia'].max()))}, hide_index=True)
 
-    if "Mañana" in modo_sesion:
-        df_analisis = df_fijos[df_fijos['Tipo_Sorteo'] == 'M'].copy()
-        titulo_sesion = "Mañana"
-    elif "Tarde" in modo_sesion:
-        df_analisis = df_fijos[df_fijos['Tipo_Sorteo'] == 'T'].copy()
-        titulo_sesion = "Tarde"
-    elif "Noche" in modo_sesion:
-        df_analisis = df_fijos[df_fijos['Tipo_Sorteo'] == 'N'].copy()
-        titulo_sesion = "Noche"
-    else:
-        df_analisis = df_fijos.copy()
-        titulo_sesion = "General"
-
-    if df_analisis.empty:
-        st.warning(f"No hay registros para: **{modo_sesion}**")
-        st.stop()
-
-    tab_patrones, tab_almanaque, tab_prediccion, tab_secuencias = st.tabs([
-        "🔍 Patrones (Números)", 
-        "📅 Almanaque", 
-        "🧠 Propuesta Inteligente",
-        "🔗 Secuencia de Dígitos"
-    ])
-
-    # ==========================================
-    # PESTAÑA 1: PATRONES DE NÚMEROS
-    # ==========================================
-    with tab_patrones:
-        st.subheader(f"Análisis de Números: {titulo_sesion}")
-        col_a, col_b = st.columns(2)
-        with col_a:
-            num_patron = st.number_input("Número Disparador:", min_value=0, max_value=99, value=40, format="%02d")
-        with col_b:
-            ven_patron = st.slider("Ventana (sorteos):", min_value=1, max_value=30, value=15, step=1)
+    # 2. ALMANAQUE
+    with tabs[1]:
+        st.subheader(f"Almanaque (Persistencia Total): {t}")
+        c_r, c_m = st.columns(2)
+        with c_r:
+            ca, cb = st.columns(2)
+            with ca: di = st.number_input("Ini:", 1, 31, 16)
+            with cb: dfi = st.number_input("Fin:", 1, 31, 31)
+        with c_m: ma = st.slider("Meses Atrás:", 1, 12, 4)
         
-        if st.button("🔍 Buscar", key="btn_patron", type="secondary"):
-            st.session_state['buscar_patron'] = True
-        
-        if st.session_state.get('buscar_patron', False):
-            df_res, total = analizar_siguientes(df_analisis, num_patron, ven_patron)
-            if df_res is None:
-                st.error(f"El número **{num_patron:02d}** no ha salido.")
+        if st.button("📊", key="b_al"): st.session_state['sal'] = True
+        if st.session_state.get('sal'):
+            if di > dfi: st.error("Error fechas.")
             else:
-                st.success(f"Basado en {total} oportunidades.")
-                max_val = int(df_res['Frecuencia'].max())
-                st.dataframe(df_res.head(20), column_config={"Número": st.column_config.TextColumn("Número", width="small"), "Frecuencia": st.column_config.ProgressColumn("Frecuencia", format="%d", min_value=0, max_value=max_val)}, hide_index=True)
+                # --- AQUÍ SE DESPAQUETAN LOS 11 VALORES ---
+                _, dec, uni, comb, rank, noms, pers_n, tend, top_p, tend_nums, pers_p = analizar_almanaque(dfa, di, dfi, ma)
+                
+                if noms: st.success(f"📅 Bloques: {', '.join(noms)}")
+                else: st.error("❌ Sin bloques válidos.")
 
-    # ==========================================
-    # PESTAÑA 2: ALMANAQUE
-    # ==========================================
-    with tab_almanaque:
-        st.subheader(f"Almanaque: {titulo_sesion}")
-        col1, col2 = st.columns(2)
-        with col1:
-            tipo_quincena = st.radio("Quincena:", ["1ra Quincena (1-15)", "2da Quincena (16-30)"])
-        with col2:
-            meses_atras = st.slider("Meses atrás:", min_value=1, max_value=12, value=3, step=1)
-        
-        if st.button("📊 Analizar", key="btn_almanaque", type="secondary"):
-            st.session_state['analisis_almanaque'] = True
-            
-        if st.session_state.get('analisis_almanaque', False):
-            df_filtrado, decenas, unidades = analizar_almanaque(df_analisis, tipo_quincena, meses_atras)
-            if df_filtrado is None:
-                st.warning("Sin datos.")
-            else:
-                general = decenas + unidades
-                df_g = general.reset_index(name='Total')
-                df_g.columns = ['Dígito', 'Total']; df_g = df_g.sort_values(by='Total', ascending=False).reset_index(drop=True)
-                df_d = decenas.reset_index(name='Decenas'); df_d.columns = ['Dígito', 'Decenas']; df_d = df_d.sort_values(by='Decenas', ascending=False).reset_index(drop=True)
-                df_u = unidades.reset_index(name='Unidades'); df_u.columns = ['Dígito', 'Unidades']; df_u = df_u.sort_values(by='Unidades', ascending=False).reset_index(drop=True)
-                c1, c2, c3 = st.columns(3)
-                with c1: st.subheader("🏆 General"); st.dataframe(df_g, hide_index=True)
-                with c2: st.subheader("🔢 Decenas"); st.dataframe(df_d, hide_index=True)
-                with c3: st.subheader("🔢 Unidades"); st.dataframe(df_u, hide_index=True)
+                cd, cu = st.columns(2)
+                with cd: st.markdown("### 🔢 Decenas"); st.dataframe(dec, hide_index=True)
+                with cu: st.markdown("### 🔢 Unidades"); st.dataframe(uni, hide_index=True)
+                
+                st.markdown("---")
+                # Tendencia
+                col_t1, col_t2 = st.columns([1, 2])
+                with col_t1:
+                    st.markdown("### 🔥 Tendencia por Perfil")
+                    if not tend.empty:
+                        mv = int(tend['Frecuencia'].max())
+                        st.dataframe(tend, column_config={"Frecuencia": st.column_config.ProgressColumn("Frecuencia", format="%d", min_value=0, max_value=mv)}, hide_index=True)
+                        st.info(f"Dominante: **{top_p}**")
+                
+                with col_t2:
+                    st.markdown("### 💡 Sugerencias")
+                    st.dataframe(tend_nums, hide_index=True)
 
-    # ==========================================
-    # PESTAÑA 3: PROPUESTA INTELIGENTE
-    # ==========================================
-    with tab_prediccion:
-        st.subheader(f"Sincronización: {titulo_sesion}")
-        col_t1, col_t2 = st.columns(2)
-        with col_t1:
-            dias_tendencia = st.number_input("Días Tendencia:", value=15, min_value=5, max_value=60)
-        with col_t2:
-            dias_minimo_gap = st.number_input("Gap Mínimo:", value=10, min_value=1, max_value=90)
-            
-        if st.button("🧠 Generar", type="primary"):
-            st.session_state['generar_prediccion'] = True
-            
-        if st.session_state.get('generar_prediccion', False):
-            df_propuesta = generar_sugerencia_tendencia(df_analisis, dias_tendencia, dias_minimo_gap)
-            if df_propuesta.empty:
-                st.warning("Sin candidatos.")
-            else:
-                st.success(f"{len(df_propuesta)} candidatos.")
-                st.dataframe(df_propuesta, hide_index=True, use_container_width=True)
+                # Persistencias
+                with st.expander("🛡️ Análisis de Persistencia"):
+                    p1, p2 = st.columns(2)
+                    with p1:
+                        st.markdown("#### 📌 Persistencia de NÚMERO")
+                        st.caption("Estos números específicos salieron en TODOS los meses.")
+                        st.dataframe(pers_n, hide_index=True)
+                    with p2:
+                        st.markdown("#### 🏷️ Persistencia de PERFIL")
+                        st.caption("Estas ETIQUETAS aparecieron en TODOS los meses.")
+                        if pers_p:
+                            st.dataframe(pd.DataFrame(list(pers_p), columns=["Perfil Persistente"]), hide_index=True)
+                        else:
+                            st.info("Ningún perfil se repite en todos los meses.")
 
-    # ==========================================
-    # PESTAÑA 4: SECUENCIA DE DÍGITOS (ACTUALIZADA CON FECHA)
-    # ==========================================
-    with tab_secuencias:
-        st.subheader(f"Patrones de Decenas/Unidades: {titulo_sesion}")
-        st.markdown("""
-        Busca una consecutividad de dígitos (ej: 5 8 3) y te dice qué dígito salió después históricamente.
-        Incluye **Ejemplos de Números y la Fecha** exacta.
-        """)
-        
-        col_tipo, col_input = st.columns([1, 2])
-        with col_tipo:
-            tipo_digito = st.selectbox("Analizar:", ["Decena", "Unidad"])
-        
-        with col_input:
-            secuencia_input = st.text_input(
-                "Ingresa la secuencia (ej: 5 8 3 7):", 
-                placeholder="Usa espacios o comas. Máx 5 dígitos."
-            )
-            
-        if st.button("🔗 Buscar Secuencia", type="primary"):
-            st.session_state['buscar_secuencia'] = True
-            
-        if st.session_state.get('buscar_secuencia', False) and secuencia_input:
-            df_res, error = buscar_secuencia_digitos(df_analisis, secuencia_input, tipo_digito)
-            
-            st.markdown("---")
-            if error:
-                st.warning(error)
-            else:
-                st.success("✅ Secuencia encontrada en el historial.")
-                st.dataframe(
-                    df_res, 
-                    column_config={
-                        "Dígito Siguiente": st.column_config.NumberColumn("Dígito Siguiente", width="small"),
-                        "Frecuencia": st.column_config.ProgressColumn("Frecuencia", format="%d", min_value=0, max_value=int(df_res['Frecuencia'].max())),
-                        "Probabilidad (%)": st.column_config.NumberColumn("Probabilidad", format="%.2f%%"),
-                        "Ejemplos Históricos (Núm + Fecha)": st.column_config.TextColumn("Ejemplos Reales", width="medium")
-                    },
-                    hide_index=True, use_container_width=True
-                )
+                # Ranking
+                with st.expander("📋 Ranking General"):
+                    st.dataframe(rank.head(20), hide_index=True)
+
+    # 3. PROPUESTA
+    with tabs[2]:
+        st.subheader(f"Sincronización: {t}")
+        c1, c2 = st.columns(2)
+        with c1: dt = st.number_input("Días Tendencia:", 5, 60, 15)
+        with c2: dg = st.number_input("Gap Mínimo:", 1, 90, 10)
+        if st.button("🧠", key="b_pr"): st.session_state['spr'] = True
+        if st.session_state.get('spr'):
+            p = generar_sugerencia(dfa, dt, dg)
+            if p.empty: st.warning("No.")
+            else: st.dataframe(p, hide_index=True)
+
+    # 4. SECUENCIA
+    with tabs[3]:
+        st.subheader(f"Secuencia: {t}")
+        c1, c2, c3 = st.columns(3)
+        with c1: part = st.selectbox("Parte:", ["Decena", "Unidad"])
+        with c2: type_ = st.selectbox("Análisis:", ["Dígito (0-9)", "Paridad (P/I)", "Altura (A/B)"])
+        with c3: seq = st.text_input("Secuencia:")
+        if st.button("🔗", key="b_seq"): st.session_state['sseq'] = True
+        if st.session_state.get('sseq') and seq:
+            r, e = buscar_seq(dfa, part, type_.lower().replace('(','').replace(')','').split(' ')[0], seq)
+            if e: st.warning(e)
+            else: st.dataframe(r, column_config={"Siguiente": st.column_config.TextColumn("Sig", width="small"), "Frecuencia": st.column_config.ProgressColumn("Frec", format="%d", min_value=0, max_value=int(r['Frecuencia'].max())), "Prob": st.column_config.NumberColumn("Prob", format="%.2f%%"), "Ejemplos": st.column_config.TextColumn("Hist", width="large")}, hide_index=True)
 
 if __name__ == "__main__":
     main()
