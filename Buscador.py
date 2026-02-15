@@ -55,16 +55,18 @@ def analizar_siguientes(df_fijos, numero_busqueda, ventana_sorteos):
     c = Counter(lista_s)
     r = pd.DataFrame.from_dict(c, orient='index', columns=['Frecuencia'])
     r['Probabilidad (%)'] = (r['Frecuencia'] / sum(lista_s) * 100).round(2) if lista_s else 0
-    r['Número'] = r.index.astype(int).apply(lambda x: f"{x:02d}")
+    
+    # --- CORRECCIÓN AQUÍ: Usar list comprehension en lugar de .apply en el índice ---
+    r['Número'] = [f"{int(x):02d}" for x in r.index]
+    
     return r.sort_values('Frecuencia', ascending=False), len(indices)
 
-# --- FUNCIÓN 2: ALMANAQUE (CON PERSISTENCIA DE PERFIL Y CORRECCIÓN DE ERROR) ---
+# --- FUNCIÓN 2: ALMANAQUE ---
 def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     fecha_hoy = datetime.now()
     bloques_validos = []
     nombres_bloques = []
     
-    # 1. Generar Bloques
     for offset in range(1, meses_atras + 1):
         f_obj = fecha_hoy - relativedelta(months=offset)
         try:
@@ -83,7 +85,6 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     df_total['Decena'] = df_total['Numero'] // 10
     df_total['Unidad'] = df_total['Numero'] % 10
     
-    # 2. Clasificación Global
     cnt_d = df_total['Decena'].value_counts().reindex(range(10), fill_value=0)
     cnt_u = df_total['Unidad'].value_counts().reindex(range(10), fill_value=0)
     
@@ -99,13 +100,11 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     df_dec, mapa_d = clasificar(cnt_d)
     df_uni, mapa_u = clasificar(cnt_u)
     
-    # 3. Matriz 3x3
     hot_d = df_dec[df_dec['Estado']=='🔥 Caliente']['Digito'].tolist()
     hot_u = df_uni[df_uni['Estado']=='🔥 Caliente']['Digito'].tolist()
     lista_3x3 = [{'Número': f"{d*10+u:02d}", 'Veces': len(df_total[df_total['Numero']==d*10+u])} for d in hot_d for u in hot_u]
     df_3x3 = pd.DataFrame(lista_3x3).sort_values('Veces', ascending=False)
 
-    # 4. Ranking General y Tendencia
     ranking = []
     for n, v in df_total['Numero'].value_counts().items():
         d = n//10; u=n%10
@@ -117,7 +116,6 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     tend.columns = ['Perfil', 'Frecuencia']
     top_p = tend.iloc[0]['Perfil'] if not tend.empty else "N/A"
 
-    # 5. Generar Sugerencias (tend_nums) basado en el top_p
     tend_nums = []
     if top_p != "N/A" and " + " in top_p:
         p_dec, p_uni = top_p.split(" + ")
@@ -129,24 +127,20 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
                 tend_nums.append({'Número': f"{n:02d}", 'Sugerencia (Perfil Tendencia)': f"{p_dec} x {p_uni}"})
     df_tend_nums = pd.DataFrame(tend_nums)
 
-    # 6. Persistencia de NÚMERO
     pers_num = []
     nums_unicos = df_total['Numero'].unique()
     for n in nums_unicos:
         c = sum(1 for b in bloques_validos if n in b['Numero'].values)
         if c == len(bloques_validos):
-            # Buscar perfil con seguridad
             perfil_val = df_rank[df_rank['Número']==f"{n:02d}"]['Perfil']
             p = perfil_val.values[0] if not perfil_val.empty else "Desconocido"
             pers_num.append({'Número': f"{n:02d}", 'Perfil': p})
     
-    # --- CORRECCIÓN AQUÍ: Manejo de lista vacía para evitar KeyError ---
     if pers_num:
         df_pers_num = pd.DataFrame(pers_num).sort_values('Número').reset_index(drop=True)
     else:
-        df_pers_num = pd.DataFrame(columns=['Número', 'Perfil']) # Crear estructura vacía correcta
+        df_pers_num = pd.DataFrame(columns=['Número', 'Perfil'])
 
-    # 7. Persistencia de PERFIL
     sets_perfiles = []
     for df_b in bloques_validos:
         perfiles_en_bloque = set()
@@ -160,7 +154,6 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     
     persistentes_perfiles = set.intersection(*sets_perfiles) if sets_perfiles else set()
         
-    # Retornamos 11 valores
     return df_total, df_dec, df_uni, df_3x3, df_rank, nombres_bloques, df_pers_num, tend, top_p, df_tend_nums, persistentes_perfiles
 
 # --- FUNCIÓN 3: PROPUESTA ---
@@ -282,7 +275,6 @@ def main():
         if st.session_state.get('sal'):
             if di > dfi: st.error("Error fechas.")
             else:
-                # --- AQUÍ SE DESPAQUETAN LOS 11 VALORES ---
                 _, dec, uni, comb, rank, noms, pers_n, tend, top_p, tend_nums, pers_p = analizar_almanaque(dfa, di, dfi, ma)
                 
                 if noms: st.success(f"📅 Bloques: {', '.join(noms)}")
@@ -293,7 +285,6 @@ def main():
                 with cu: st.markdown("### 🔢 Unidades"); st.dataframe(uni, hide_index=True)
                 
                 st.markdown("---")
-                # Tendencia
                 col_t1, col_t2 = st.columns([1, 2])
                 with col_t1:
                     st.markdown("### 🔥 Tendencia por Perfil")
@@ -306,7 +297,6 @@ def main():
                     st.markdown("### 💡 Sugerencias")
                     st.dataframe(tend_nums, hide_index=True)
 
-                # Persistencias
                 with st.expander("🛡️ Análisis de Persistencia"):
                     p1, p2 = st.columns(2)
                     with p1:
@@ -321,7 +311,6 @@ def main():
                         else:
                             st.info("Ningún perfil se repite en todos los meses.")
 
-                # Ranking
                 with st.expander("📋 Ranking General"):
                     st.dataframe(rank.head(20), hide_index=True)
 
