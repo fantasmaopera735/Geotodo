@@ -59,18 +59,18 @@ def analizar_siguientes(df_fijos, numero_busqueda, ventana_sorteos):
     r['Número'] = [f"{int(x):02d}" for x in r.index]
     return r.sort_values('Frecuencia', ascending=False), len(indices)
 
-# --- FUNCIÓN 2: ALMANAQUE ---
+# --- FUNCIÓN 2: AHORA GENERA HISTORIAL EN VIVO (MES ACTUAL) Y FALTANTES ---
 def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
     fecha_hoy = datetime.now()
+    
+    # --- PASO 1: CALCULAR REGLAS CON MESES ATRÁS (ENTRENAMIENTO) ---
     bloques_validos = []
     nombres_bloques = []
     for offset in range(1, meses_atras + 1):
         f_obj = fecha_hoy - relativedelta(months=offset)
         try:
             f_i = datetime(f_obj.year, f_obj.month, dia_inicio)
-            # Ajuste para manejar meses con menos días (ej. Feb 30)
             if dia_fin > 28:
-                # Si pides 31 dias, usar el último día real de ese mes
                 last_day = calendar.monthrange(f_obj.year, f_obj.month)[1]
                 f_f = datetime(f_obj.year, f_obj.month, min(dia_fin, last_day))
             
@@ -81,7 +81,8 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
                 nombres_bloques.append(f"{f_i.strftime('%d/%m')}-{f_f.strftime('%d/%m')}")
         except: continue
 
-    if not bloques_validos: return None, "Sin datos.", None, None, None, None, None, None, None, None, None, None, None
+    if not bloques_validos: return None, "Sin datos.", None, None, None, None, None, None, None, None, None, None, None, None
+    
     df_total = pd.concat(bloques_validos)
     df_total['Decena'] = df_total['Numero'] // 10
     df_total['Unidad'] = df_total['Numero'] % 10
@@ -95,7 +96,9 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
         conds = [(df_t.index < 3), (df_t.index < 6)]
         vals = ['🔥 Caliente', '🟡 Tibio']
         df_t['Estado'] = np.select(conds, vals, default='🧊 Frío')
-        mapa = {r['Digito']: r['Estado'] for _, r in df_t.iterrows()}
+        mapa = {}
+        for _, r in df_t.iterrows():
+            mapa[r['Digito']] = r['Estado']
         return df_t, mapa
 
     df_dec, mapa_d = clasificar(cnt_d)
@@ -152,28 +155,95 @@ def analizar_almanaque(df_fijos, dia_inicio, dia_fin, meses_atras):
         sets_perfiles.append(perfiles_en_bloque)
     
     persistentes_perfiles = set.intersection(*sets_perfiles) if sets_perfiles else set()
-    return df_total, df_dec, df_uni, df_3x3, df_rank, nombres_bloques, df_pers_num, tend, top_p, df_tend_nums, persistentes_perfiles
+    persistentes_num_set = set([p['Número'] for p in pers_num]) if pers_num else set()
 
-# --- FUNCIÓN 5: BACKTESTING (MEJORADA) ---
+    # --- PASO 2: EVALUAR MES ACTUAL (FECHA ACTUAL) ---
+    hoy = datetime.now()
+    
+    try:
+        fin_mes_actual = calendar.monthrange(hoy.year, hoy.month)[1]
+        fecha_ini_evaluacion = datetime(hoy.year, hoy.month, dia_inicio)
+        fecha_fin_teorica = datetime(hoy.year, hoy.month, min(dia_fin, fin_mes_actual))
+        
+        estado_periodo = ""
+        df_historial_actual = pd.DataFrame()
+        
+        if hoy < fecha_ini_evaluacion:
+            estado_periodo = f"⚪ PERIODO NO INICIADO (Comienza el {fecha_ini_evaluacion.strftime('%d/%m')})"
+        else:
+            fecha_fin_real = min(hoy, fecha_fin_teorica) 
+            df_evaluacion = df_fijos[(df_fijos['Fecha'] >= fecha_ini_evaluacion) & (df_fijos['Fecha'] <= fecha_fin_real)].copy()
+            
+            if not df_evaluacion.empty:
+                historial_data = []
+                for row in df_evaluacion.itertuples():
+                    num = row.Numero
+                    d = num // 10
+                    u = num % 10
+                    
+                    ed = mapa_d.get(d, '?')
+                    eu = mapa_u.get(u, '?')
+                    perfil_completo = f"{ed} + {eu}"
+                    
+                    cumple_regla = False
+                    motivo = ""
+                    
+                    if f"{num:02d}" in persistentes_num_set:
+                        cumple_regla = True
+                        motivo = "Num. Persistente"
+                    elif perfil_completo in persistentes_perfiles:
+                        cumple_regla = True
+                        motivo = "Perfil Persistente"
+                    
+                    historial_data.append({
+                        'Fecha': row.Fecha,
+                        'Número': f"{num:02d}",
+                        'Perfil (D/U)': perfil_completo,
+                        'Cumple Regla': '✅ SÍ' if cumple_regla else '❌ NO',
+                        'Tipo Regla': motivo if cumple_regla else '-'
+                    })
+                df_historial_actual = pd.DataFrame(historial_data).sort_values('Fecha', ascending=False).reset_index(drop=True)
+            
+            estado_periodo = f"🟢 PERIODO ACTIVO (Evaluado hasta: {hoy.strftime('%d/%m')})"
+            
+    except ValueError:
+        estado_periodo = "⚪ Configuración de fechas inválida para el mes actual"
+        df_historial_actual = pd.DataFrame()
+
+    # --- PASO 3: CALCULAR FALTANTES (PROPUESTAS) ---
+    df_faltantes = pd.DataFrame()
+    
+    if "ACTIVO" in estado_periodo:
+        esperados = set(df_rank.head(20)['Número'].tolist())
+        esperados.update(persistentes_num_set)
+        
+        if not df_historial_actual.empty:
+            salidos = set([int(x) for x in df_historial_actual['Número'].unique()])
+            faltantes_nums = esperados - salidos
+        else:
+            faltantes_nums = esperados
+            
+        if faltantes_nums:
+            df_faltantes = pd.DataFrame([{'Número': n, 'Estado': '⏳ FALTANTE / PROPUESTO'} for n in sorted(list(faltantes_nums))])
+
+    return df_total, df_dec, df_uni, df_3x3, df_rank, nombres_bloques, df_pers_num, tend, top_p, df_tend_nums, persistentes_perfiles, df_historial_actual, df_faltantes, estado_periodo
+
+# --- FUNCIÓN 5: BACKTESTING ---
 def backtesting_estrategia_congelada(df_fijos, mes_objetivo, anio_objetivo, dia_ini, dia_fin, meses_atras):
     try:
         fecha_ref = datetime(anio_objetivo, mes_objetivo, 1)
         bloques_train = []
         nombres_bloques_train = []
         
-        st.write(f"DEBUG: Iniciando simulación para {fecha_ref.strftime('%B %Y')}")
-        
         for offset in range(1, meses_atras + 1):
             f_obj = fecha_ref - relativedelta(months=offset)
             try:
-                # Ajuste inteligente de fechas
                 last_day = (f_obj.replace(day=1) + relativedelta(months=1) - timedelta(days=1)).day
                 f_i = datetime(f_obj.year, f_obj.month, dia_ini)
                 f_f = datetime(f_obj.year, f_obj.month, min(dia_fin, last_day))
                 
                 if f_i > f_f: continue
                 
-                # Filtro (Corregido typo f_f_f a f_f)
                 df_b = df_fijos[(df_fijos['Fecha'] >= f_i) & (df_fijos['Fecha'] <= f_f)]
                 
                 if not df_b.empty:
@@ -186,8 +256,8 @@ def backtesting_estrategia_congelada(df_fijos, mes_objetivo, anio_objetivo, dia_
                 nombres_bloques_train.append(f"Error en {f_obj.strftime('%B %Y')}: {str(e)}")
 
         if not bloques_train:
-            st.error(f"❌ Sin datos para entrenamiento. Revisa tus fechas y tu archivo CSV para ver si tienes registros en los meses solicitados.")
-            st.info("💡 Posible causa: Buscas datos en fechas inexistentes (ej. 30 de Febrero) o falta de datos en la sesión seleccionada (ej. No hay sorteos 'Mañana' en esos meses.")
+            st.error(f"❌ Sin datos para entrenamiento.")
+            st.info("💡 Revisa las fechas y el archivo CSV.")
             return None, "Sin datos para entrenamiento.", None, None, None, None, None, None, None, None, None, None, None, None
 
         df_train_total = pd.concat(bloques_train)
@@ -202,8 +272,9 @@ def backtesting_estrategia_congelada(df_fijos, mes_objetivo, anio_objetivo, dia_
             conds = [(df_t.index < 3), (df_t.index < 6)]
             vals = ['🔥 Caliente', '🟡 Tibio']
             df_t['Estado'] = np.select(conds, vals, default='🧊 Frío')
-            mapa = {r['Digito']: r['Estado'] for _, r in df_t.iterrows()}
-            
+            mapa = {}
+            for _, r in df_t.iterrows():
+                mapa[r['Digito']] = r['Estado']
             hot = [r['Digito'] for _, r in df_t.iterrows() if r['Estado'] == '🔥 Caliente']
             warm = [r['Digito'] for _, r in df_t.iterrows() if r['Estado'] == '🟡 Tibio']
             cold = [r['Digito'] for _, r in df_t.iterrows() if r['Estado'] == '🧊 Frío']
@@ -327,6 +398,29 @@ def analizar_estabilidad_numeros(df_fijos, dias_analisis=365):
     df_est = df_est.sort_values(by=['Gap Máximo (Días)', 'Desviación (Irregularidad)'], ascending=[True, True]).reset_index(drop=True)
     return df_est
 
+# --- FUNCIÓN: ANÁLISIS DE GRUPO ESTABLE ---
+def calcular_gap_grupo(df_fijos, lista_numeros):
+    df_grupo = df_fijos[df_fijos['Numero'].isin(lista_numeros)].sort_values('sort_key')
+    if df_grupo.empty or len(df_grupo) < 2: return None
+    fechas_grupo = df_grupo['Fecha'].tolist()
+    gaps_grupo = [(fechas_grupo[i+1] - fechas_grupo[i]).days for i in range(len(fechas_grupo)-1)]
+    if not gaps_grupo: return None
+    avg_gap = np.mean(gaps_grupo)
+    max_gap = max(gaps_grupo)
+    last_hit = fechas_grupo[-1]
+    current_gap = (datetime.now() - last_hit).days
+    if current_gap == 0: estado_grupo = "🔥 EN RACHA"
+    elif current_gap <= avg_gap: estado_grupo = "✅ NORMAL"
+    elif current_gap <= avg_gap * 1.5: estado_grupo = "⏳ ATENCIÓN"
+    else: estado_grupo = "🔴 URGENTE (VENCIDO)"
+    return {
+        "Promedio Dias": round(avg_gap, 1),
+        "Gap Actual": current_gap,
+        "Gap Maximo": max_gap,
+        "Ultima Salida": last_hit.strftime('%d/%m/%Y'),
+        "Estado": estado_grupo
+    }
+
 # --- FUNCIONES AUXILIARES ---
 def generar_sugerencia(df, dias, gap):
     fh = datetime.now()
@@ -383,7 +477,6 @@ def buscar_seq(df, part, type_, seq):
 def main():
     df = cargar_datos_geotodo(RUTA_CSV)
     
-    # --- VARIABLES GLOBALES ---
     meses = {1:"Enero", 2:"Febrero", 3:"Marzo", 4:"Abril", 5:"Mayo", 6:"Junio", 7:"Julio", 8:"Agosto", 9:"Septiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"}
     fecha_hoy = datetime.now()
     mes_default = fecha_hoy.month - 1 if fecha_hoy.month > 1 else 12
@@ -425,7 +518,6 @@ def main():
     
     tabs = st.tabs(["🔍 Patrones", "📅 Almanaque Ultimate", "🧠 Propuesta", "🔗 Secuencia", "🧪 Laboratorio", "📉 Estabilidad (Gaps)"])
 
-    # 1. PATRONES
     with tabs[0]:
         st.subheader(f"Patrones: {t}")
         c1, c2 = st.columns(2)
@@ -437,7 +529,6 @@ def main():
             if r is None: st.error("No salió.")
             else: st.dataframe(r.head(20), column_config={"Frecuencia": st.column_config.ProgressColumn("Frecuencia", format="%d", min_value=0, max_value=int(r['Frecuencia'].max()))}, hide_index=True)
 
-    # 2. ALMANAQUE
     with tabs[1]:
         st.subheader(f"Almanaque (Persistencia Total): {t}")
         c_r, c_m = st.columns(2)
@@ -451,14 +542,47 @@ def main():
         if st.session_state.get('sal'):
             if di > dfi: st.error("Error fechas.")
             else:
-                _, dec, uni, comp, rank, noms, pers_n, tend, top_p, tend_nums, pers_p = analizar_almanaque(dfa, di, dfi, ma)
+                _, dec, uni, comp, rank, noms, pers_n, tend, top_p, tend_nums, pers_p, hist_actual, falt, est_per = analizar_almanaque(dfa, di, dfi, ma)
                 
-                if noms: st.success(f"📅 Bloques: {', '.join(noms)}")
-                else: st.error("❌ Sin bloques válidos.")
+                # --- CONTROL DE SEGURIDAD: Si hist_actual es None, hubo error en datos ---
+                if hist_actual is None:
+                    st.error("❌ No se pudieron calcular los datos. Probablemente no hay sorteos en los meses seleccionados o el archivo CSV está incompleto.")
+                    st.stop() # Detenemos la ejecución de esta pestaña para evitar el crash
+                
+                if noms: st.success(f"📅 Entrenamiento: {', '.join(noms)}")
 
-                cd, cu = st.columns(2)
-                with cd: st.markdown("### 🔢 Decenas"); st.dataframe(dec, hide_index=True)
-                with cu: st.markdown("### 🔢 Unidades"); st.dataframe(uni, hide_index=True)
+                st.markdown("---")
+                st.subheader("⏱️ Evaluación en Tiempo Real (Mes Actual)")
+                st.info(f"**Estado:** {est_per}")
+                
+                col_h, col_f = st.columns([2, 1])
+                
+                with col_h:
+                    if not hist_actual.empty:
+                        hist_view = hist_actual.copy()
+                        hist_view['Fecha'] = hist_view['Fecha'].dt.strftime('%d/%m/%Y %H:%M')
+                        st.markdown("### 📜 Resultados Reales (Con Perfiles Aplicados)")
+                        st.caption("Estos son los números que YA han salido en el rango seleccionado del mes actual.")
+                        st.dataframe(hist_view, use_container_width=True, hide_index=True)
+                    elif "NO INICIADO" in est_per:
+                        st.warning("Aún no se han generado resultados en el rango de fechas seleccionado.")
+                    else:
+                        st.warning("No hay datos de sorteos disponibles para el periodo actual.")
+
+                with col_f:
+                    st.markdown("### ⏳ Faltantes / Propuestos")
+                    if not falt.empty:
+                        st.dataframe(falt, use_container_width=True, hide_index=True)
+                    elif "NO INICIADO" in est_per:
+                        st.info("Esperando inicio del periodo.")
+                    else:
+                        st.success("🎉 ¡Todos los esperados han salido!")
+
+                st.markdown("---")
+
+                col_d1, col_d2 = st.columns(2)
+                with col_d1: st.markdown("### 🔢 Decenas"); st.dataframe(dec, hide_index=True)
+                with col_d2: st.markdown("### 🔢 Unidades"); st.dataframe(uni, hide_index=True)
                 
                 st.markdown("---")
                 col_t1, col_t2 = st.columns([1, 2])
@@ -477,20 +601,19 @@ def main():
                     p1, p2 = st.columns(2)
                     with p1:
                         st.markdown("#### 📌 Persistencia de NÚMERO")
-                        st.caption("Estos números específicos salieron en TODOS los meses.")
+                        st.caption("Estos números específicos salieron en TODOS los meses (Pasados).")
                         st.dataframe(pers_n, hide_index=True)
                     with p2:
                         st.markdown("#### 🏷️ Persistencia de PERFIL")
-                        st.caption("Estas ETIQUETAS aparecieron en TODOS los meses.")
+                        st.caption("Estas ETIQUETAS aparecieron en TODOS los meses (Pasados).")
                         if pers_p:
                             st.dataframe(pd.DataFrame(list(pers_p), columns=["Perfil Persistente"]), hide_index=True)
                         else:
                             st.info("Ningún perfil se repite en todos los meses.")
 
-                with st.expander("📋 Ranking General"):
+                with st.expander("📋 Ranking General (Histórico)"):
                     st.dataframe(rank.head(20), hide_index=True)
 
-    # 3. PROPUESTA
     with tabs[2]:
         st.subheader(f"Sincronización: {t}")
         c1, c2 = st.columns(2)
@@ -502,7 +625,6 @@ def main():
             if p.empty: st.warning("No.")
             else: st.dataframe(p, hide_index=True)
 
-    # 4. SECUENCIA
     with tabs[3]:
         st.subheader(f"Secuencia: {t}")
         c1, c2, c3 = st.columns(3)
@@ -515,11 +637,9 @@ def main():
             if e: st.warning(e)
             else: st.dataframe(r, column_config={"Siguiente": st.column_config.TextColumn("Sig", width="small"), "Frecuencia": st.column_config.ProgressColumn("Frec", format="%d", min_value=0, max_value=int(r['Frecuencia'].max())), "Prob": st.column_config.NumberColumn("Prob", format="%.2f%%"), "Ejemplos": st.column_config.TextColumn("Hist", width="large")}, hide_index=True)
 
-    # 5. LABORATORIO (MEJORADA DIAGNÓSTICA)
     with tabs[4]:
         st.subheader("🧪 Simulador: Estrategia vs Realidad")
         
-        # VARIABLES LOCALES PARA EVITAR ERRORES DE SCOPE
         meses_lab = {1:"Enero", 2:"Febrero", 3:"Marzo", 4:"Abril", 5:"Mayo", 6:"Junio", 7:"Julio", 8:"Agosto", 9:"Septiembre", 10:"Octubre", 11:"Noviembre", 12:"Diciembre"}
         fecha_hoy_lab = datetime.now()
         mes_default_lab = fecha_hoy_lab.month - 1 if fecha_hoy_lab.month > 1 else 12
@@ -567,7 +687,6 @@ def main():
                         st.markdown("### 🎲 LA REALIDAD (LO QUE PASÓ)")
                         st.caption(f"Sorteos de: {res['Periodo Prueba']}")
                         
-                        # DEFINIR COLUMNAS DE MÉTRICAS AQUÍ PARA EVITAR ERROR DE SCOPE
                         m1, m2, m3 = st.columns(3)
                         
                         m1.metric("Total Sorteos", res['Total Prueba'])
@@ -590,21 +709,15 @@ def main():
                             column_config={
                                 "Resultado": st.column_config.TextColumn("Análisis", width="medium"),
                                 "Decena (Congelada)": st.column_config.TextColumn("Decena", width="medium"),
-                                "Unidad (Indice": st.column_config.TextColumn("Unidad", width="medium") # Ajustado nombre clave
+                                "Unidad (Indice": st.column_config.TextColumn("Unidad", width="medium")
                             },
                             use_container_width=True, hide_index=True
                         )
                 else:
-                    # Si res es un string (Error), muéstralo en rojo
                     st.error(f"🛑 {res}")
 
-    # 6. ESTABILIDAD
     with tabs[5]:
         st.subheader(f"📉 Estabilidad y Análisis de Gaps: {t}")
-        st.markdown("""
-        **Estabilidad + Estado de Oportunidad:**
-        Identifica los **Números de Hierro** (Estables) y detecta qué números están **Vencidos** (Oportunidad de salida).
-        """)
         
         col_e1, col_e2 = st.columns(2)
         with col_e1:
@@ -613,7 +726,9 @@ def main():
         if st.button("📊 Calcular Estabilidad y Estado", key="b_est"):
             with st.spinner("Midiendo intervalos..."):
                 df_est = analizar_estabilidad_numeros(dfa, dias_analisis)
-                if df_est is None: st.error("Sin datos suficientes.")
+                
+                if df_est is None: 
+                    st.error("Sin datos suficientes.")
                 else:
                     st.markdown("### 🏆 Ranking de Estabilidad y Oportunidad")
                     
