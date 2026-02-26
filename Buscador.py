@@ -788,19 +788,18 @@ def buscar_seq(df_fijos, part, type_, seq):
     return pd.DataFrame(rows).sort_values('Frecuencia', ascending=False), None
 
 def analizar_transferencia_geotodo(df_completo, dias_atras=180):
-    # CORRECCIÓN DEFINITIVA: Usar 'Fijo' porque df_completo mantiene nombres originales
     fecha_hoy = datetime.now()
     fecha_inicio = fecha_hoy - timedelta(days=dias_atras)
     df_filtrado = df_completo[df_completo['Fecha'] >= fecha_inicio].copy()
     fechas_unicas = sorted(df_filtrado['Fecha'].dt.date.unique())
     
-    # Agregado M->T al diccionario de eventos
-    eventos = {'M->T': [], 'T->N': [], 'N->T': []}
+    # Diccionario corregido con las 3 transferencias lógicas
+    eventos = {'M->T': [], 'T->N': [], 'N->M': []}
     
     for i, fecha in enumerate(fechas_unicas):
         df_dia = df_filtrado[df_filtrado['Fecha'].dt.date == fecha]
         
-        # Extraer valores M, T, N
+        # Extraer valores M, T, N actuales
         fijo_M_vals = df_dia[df_dia['Tipo_Sorteo'] == 'M']['Fijo'].values
         fijo_T_vals = df_dia[df_dia['Tipo_Sorteo'] == 'T']['Fijo'].values
         fijo_N_vals = df_dia[df_dia['Tipo_Sorteo'] == 'N']['Fijo'].values
@@ -809,32 +808,33 @@ def analizar_transferencia_geotodo(df_completo, dias_atras=180):
         fijo_T = int(float(fijo_T_vals[0])) if len(fijo_T_vals) > 0 else None
         fijo_N = int(float(fijo_N_vals[0])) if len(fijo_N_vals) > 0 else None
         
-        # Lógica M -> T (Mañana a Tarde mismo día)
+        # 1. Lógica M -> T (Mañana a Tarde mismo día)
         if fijo_M is not None and fijo_T is not None:
             decena_M = fijo_M // 10
             unidad_T = fijo_T % 10
             if decena_M == unidad_T:
                 eventos['M->T'].append({'fecha': fecha, 'digito': decena_M})
         
-        # Lógica T -> N (Tarde a Noche mismo día)
+        # 2. Lógica T -> N (Tarde a Noche mismo día)
         if fijo_T is not None and fijo_N is not None:
             decena_T = fijo_T // 10
             unidad_N = fijo_N % 10
             if decena_T == unidad_N:
                 eventos['T->N'].append({'fecha': fecha, 'digito': decena_T})
         
-        # Lógica N -> T (Noche a Tarde día siguiente)
+        # 3. Lógica N -> M (Noche a Mañana día siguiente)
         if fijo_N is not None and i < len(fechas_unicas) - 1:
             fecha_siguiente = fechas_unicas[i + 1]
             df_siguiente = df_filtrado[df_filtrado['Fecha'].dt.date == fecha_siguiente]
-            fijo_T_sig_vals = df_siguiente[df_siguiente['Tipo_Sorteo'] == 'T']['Fijo'].values
-            fijo_T_sig = int(float(fijo_T_sig_vals[0])) if len(fijo_T_sig_vals) > 0 else None
+            # Buscamos la Mañana del día siguiente
+            fijo_M_sig_vals = df_siguiente[df_siguiente['Tipo_Sorteo'] == 'M']['Fijo'].values
+            fijo_M_sig = int(float(fijo_M_sig_vals[0])) if len(fijo_M_sig_vals) > 0 else None
             
-            if fijo_T_sig is not None:
+            if fijo_M_sig is not None:
                 decena_N = fijo_N // 10
-                unidad_T_sig = fijo_T_sig % 10
-                if decena_N == unidad_T_sig:
-                    eventos['N->T'].append({'fecha': fecha, 'digito': decena_N})
+                unidad_M_sig = fijo_M_sig % 10
+                if decena_N == unidad_M_sig:
+                    eventos['N->M'].append({'fecha': fecha, 'digito': decena_N})
     
     fecha_hoy_date = fecha_hoy.date()
     stats = []
@@ -1036,7 +1036,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("🔄 Transferencia Decena → Unidad")
     st.markdown("**Analiza cuando la decena de un sorteo pasa como unidad al siguiente**")
-    st.info("M→T: Decena Mañana → Unidad Tarde | T→N: Decena Tarde → Unidad Noche | N→T: Decena Noche → Unidad Tarde (día siguiente)")
+    st.info("M→T: Decena Mañana → Unidad Tarde | T→N: Decena Tarde → Unidad Noche | N→M: Decena Noche → Unidad Mañana (día siguiente)")
     
     dias_stats = st.slider("Días de historial:", 30, 365, 180, key="trans_stats")
     
