@@ -793,48 +793,48 @@ def analizar_transferencia_geotodo(df_completo, dias_atras=180):
     df_filtrado = df_completo[df_completo['Fecha'] >= fecha_inicio].copy()
     fechas_unicas = sorted(df_filtrado['Fecha'].dt.date.unique())
     
-    # Diccionario corregido con las 3 transferencias lógicas
     eventos = {'M->T': [], 'T->N': [], 'N->M': []}
     
     for i, fecha in enumerate(fechas_unicas):
         df_dia = df_filtrado[df_filtrado['Fecha'].dt.date == fecha]
         
-        # Extraer valores M, T, N actuales
-        fijo_M_vals = df_dia[df_dia['Tipo_Sorteo'] == 'M']['Fijo'].values
-        fijo_T_vals = df_dia[df_dia['Tipo_Sorteo'] == 'T']['Fijo'].values
-        fijo_N_vals = df_dia[df_dia['Tipo_Sorteo'] == 'N']['Fijo'].values
+        try:
+            fila_M = df_dia[df_dia['Tipo_Sorteo'] == 'M']
+            fila_T = df_dia[df_dia['Tipo_Sorteo'] == 'T']
+            fila_N = df_dia[df_dia['Tipo_Sorteo'] == 'N']
+            
+            fijo_M_val = int(float(fila_M['Fijo'].iloc[0])) if not fila_M.empty else None
+            fijo_T_val = int(float(fila_T['Fijo'].iloc[0])) if not fila_T.empty else None
+            fijo_N_val = int(float(fila_N['Fijo'].iloc[0])) if not fila_N.empty else None
+        except:
+            continue
         
-        fijo_M = int(float(fijo_M_vals[0])) if len(fijo_M_vals) > 0 else None
-        fijo_T = int(float(fijo_T_vals[0])) if len(fijo_T_vals) > 0 else None
-        fijo_N = int(float(fijo_N_vals[0])) if len(fijo_N_vals) > 0 else None
-        
-        # 1. Lógica M -> T (Mañana a Tarde mismo día)
-        if fijo_M is not None and fijo_T is not None:
-            decena_M = fijo_M // 10
-            unidad_T = fijo_T % 10
+        if fijo_M_val is not None and fijo_T_val is not None:
+            decena_M = fijo_M_val // 10
+            unidad_T = fijo_T_val % 10
             if decena_M == unidad_T:
                 eventos['M->T'].append({'fecha': fecha, 'digito': decena_M})
         
-        # 2. Lógica T -> N (Tarde a Noche mismo día)
-        if fijo_T is not None and fijo_N is not None:
-            decena_T = fijo_T // 10
-            unidad_N = fijo_N % 10
+        if fijo_T_val is not None and fijo_N_val is not None:
+            decena_T = fijo_T_val // 10
+            unidad_N = fijo_N_val % 10
             if decena_T == unidad_N:
                 eventos['T->N'].append({'fecha': fecha, 'digito': decena_T})
         
-        # 3. Lógica N -> M (Noche a Mañana día siguiente)
-        if fijo_N is not None and i < len(fechas_unicas) - 1:
+        if fijo_N_val is not None and i < len(fechas_unicas) - 1:
             fecha_siguiente = fechas_unicas[i + 1]
             df_siguiente = df_filtrado[df_filtrado['Fecha'].dt.date == fecha_siguiente]
-            # Buscamos la Mañana del día siguiente
-            fijo_M_sig_vals = df_siguiente[df_siguiente['Tipo_Sorteo'] == 'M']['Fijo'].values
-            fijo_M_sig = int(float(fijo_M_sig_vals[0])) if len(fijo_M_sig_vals) > 0 else None
+            fila_M_sig = df_siguiente[df_siguiente['Tipo_Sorteo'] == 'M']
             
-            if fijo_M_sig is not None:
-                decena_N = fijo_N // 10
-                unidad_M_sig = fijo_M_sig % 10
-                if decena_N == unidad_M_sig:
-                    eventos['N->M'].append({'fecha': fecha, 'digito': decena_N})
+            if not fila_M_sig.empty:
+                try:
+                    fijo_M_sig_val = int(float(fila_M_sig['Fijo'].iloc[0]))
+                    decena_N = fijo_N_val // 10
+                    unidad_M_sig = fijo_M_sig_val % 10
+                    if decena_N == unidad_M_sig:
+                        eventos['N->M'].append({'fecha': fecha, 'digito': decena_N})
+                except:
+                    pass
     
     fecha_hoy_date = fecha_hoy.date()
     stats = []
@@ -845,32 +845,57 @@ def analizar_transferencia_geotodo(df_completo, dias_atras=180):
             promedio_historico = round(np.mean(gaps), 1) if gaps else 0
             secuencia_reciente = round(np.mean(gaps[-2:]), 1) if len(gaps) >= 2 else (gaps[0] if gaps else promedio_historico)
             
-            tipo_secuencia = "NORMAL"
-            prediccion_dias = promedio_historico
+            if secuencia_reciente < promedio_historico * 0.7:
+                tipo_secuencia = "ACELERADO"
+                prediccion_dias = secuencia_reciente
+            elif secuencia_reciente > promedio_historico * 1.3:
+                tipo_secuencia = "LENTO"
+                prediccion_dias = secuencia_reciente
+            else:
+                tipo_secuencia = "NORMAL"
+                prediccion_dias = promedio_historico
             
             ultimo_evento = eventos_lista[-1]
             ultima_fecha = ultimo_evento['fecha']
             ultimo_digito = ultimo_evento['digito']
             dias_sin_evento = (fecha_hoy_date - ultima_fecha).days
             
-            if dias_sin_evento >= prediccion_dias:
-                estado_ciclo = "ALERTA"
+            if dias_sin_evento > promedio_historico * 3:
+                estado_ciclo = "REINICIAR - Esperar primera vez"
+                alerta = False
+            elif dias_sin_evento >= prediccion_dias:
+                estado_ciclo = "ALERTA - Puede repetir"
                 alerta = True
             else:
-                estado_ciclo = "EN CICLO"
+                estado_ciclo = "EN CICLO - Aun no toca"
                 alerta = False
             
+            dias_estimados = max(0, round(prediccion_dias - dias_sin_evento, 0))
             frecuencia = len(eventos_lista)
             
+        elif len(eventos_lista) == 1:
+            ultimo_evento = eventos_lista[0]
+            ultima_fecha = ultimo_evento['fecha']
+            ultimo_digito = ultimo_evento['digito']
+            dias_sin_evento = (fecha_hoy_date - ultima_fecha).days
+            promedio_historico = 0
+            tipo_secuencia = "SIN DATOS"
+            estado_ciclo = "PRIMERA VEZ - Esperar para segunda"
+            alerta = False
+            frecuencia = 1
+            prediccion_dias = 0
+            dias_estimados = 0
         else:
-            frecuencia = len(eventos_lista)
+            frecuencia = 0
             dias_sin_evento = 999
             promedio_historico = 0
-            estado_ciclo = "SIN DATOS"
+            tipo_secuencia = "SIN DATOS"
+            estado_ciclo = "SIN EVENTOS - Esperar primera vez"
             alerta = False
             ultima_fecha = None
             ultimo_digito = None
             prediccion_dias = 0
+            dias_estimados = 0
         
         stats.append({
             'Transferencia': tipo, 'Frecuencia': frecuencia,
@@ -878,7 +903,7 @@ def analizar_transferencia_geotodo(df_completo, dias_atras=180):
             'Prediccion_Dias': prediccion_dias, 'Ultima_Fecha': ultima_fecha.strftime('%d/%m/%Y') if ultima_fecha else 'N/A',
             'Ultimo_Digito': ultimo_digito if ultimo_digito is not None else 'N/A',
             'Dias_Sin_Evento': dias_sin_evento, 'Estado_Ciclo': estado_ciclo,
-            'Alerta': alerta
+            'Alerta': alerta, 'Dias_Estimados': dias_estimados
         })
     
     return pd.DataFrame(stats)
@@ -1038,6 +1063,15 @@ with tabs[1]:
     st.markdown("**Analiza cuando la decena de un sorteo pasa como unidad al siguiente**")
     st.info("M→T: Decena Mañana → Unidad Tarde | T→N: Decena Tarde → Unidad Noche | N→M: Decena Noche → Unidad Mañana (día siguiente)")
     
+    st.markdown("### Lógica de Ciclos")
+    st.markdown("""
+    - **1ra vez**: El evento ocurre → Se marca el ciclo (NO se apuesta)
+    - **2da vez**: Puede repetir → **ALERTA: apostar**
+    - **3ra vez**: Puede repetir → **ALERTA: apostar**
+    - **Si se aleja 3x del promedio**: Reiniciar ciclo, esperar 1ra vez
+    - **ACELERADO**: Secuencia actual más rápida que el promedio → usar secuencia reciente
+    """)
+    
     dias_stats = st.slider("Días de historial:", 30, 365, 180, key="trans_stats")
     
     if st.button("Analizar Transferencias", type="primary", key="btn_trans"):
@@ -1056,10 +1090,41 @@ with tabs[1]:
             if row['Alerta']:
                 st.success(f"✅ **{row['Transferencia']}** - ALERTA: Puede repetir")
                 st.markdown(f"📅 Último evento: {row['Ultima_Fecha']} (dígito {row['Ultimo_Digito']})")
-                st.markdown(f"📊 Sin evento hace: {row['Dias_Sin_Evento']} días")
+                st.markdown(f"📊 Sin evento hace: {row['Dias_Sin_Evento']} días | Predicción: cada {row['Prediccion_Dias']} días")
+                
+                if row['Transferencia'] == 'M->T':
+                    ultimo_M = df_fijos[df_fijos['Tipo_Sorteo'] == 'M'].iloc[-1] if len(df_fijos[df_fijos['Tipo_Sorteo'] == 'M']) > 0 else None
+                    if ultimo_M is not None:
+                        decena_actual = int(ultimo_M['Numero']) // 10
+                        nums_sugeridos = [f"{d*10 + decena_actual:02d}" for d in range(10)]
+                        st.markdown(f"🎯 **Fijo Mañana**: {int(ultimo_M['Numero']):02d} → Decena: **{decena_actual}**")
+                        st.markdown(f"💰 **Jugar en TARDE números terminados en {decena_actual}:** {', '.join(nums_sugeridos)}")
+                
+                elif row['Transferencia'] == 'T->N':
+                    ultimo_T = df_fijos[df_fijos['Tipo_Sorteo'] == 'T'].iloc[-1] if len(df_fijos[df_fijos['Tipo_Sorteo'] == 'T']) > 0 else None
+                    if ultimo_T is not None:
+                        decena_actual = int(ultimo_T['Numero']) // 10
+                        nums_sugeridos = [f"{d*10 + decena_actual:02d}" for d in range(10)]
+                        st.markdown(f"🎯 **Fijo Tarde**: {int(ultimo_T['Numero']):02d} → Decena: **{decena_actual}**")
+                        st.markdown(f"💰 **Jugar en NOCHE números terminados en {decena_actual}:** {', '.join(nums_sugeridos)}")
+                
+                elif row['Transferencia'] == 'N->M':
+                    ultimo_N = df_fijos[df_fijos['Tipo_Sorteo'] == 'N'].iloc[-1] if len(df_fijos[df_fijos['Tipo_Sorteo'] == 'N']) > 0 else None
+                    if ultimo_N is not None:
+                        decena_actual = int(ultimo_N['Numero']) // 10
+                        nums_sugeridos = [f"{d*10 + decena_actual:02d}" for d in range(10)]
+                        st.markdown(f"🎯 **Fijo Noche**: {int(ultimo_N['Numero']):02d} → Decena: **{decena_actual}**")
+                        st.markdown(f"💰 **Jugar en MAÑANA (día siguiente) números terminados en {decena_actual}:** {', '.join(nums_sugeridos)}")
             else:
                 st.info(f"⏳ **{row['Transferencia']}** - {row['Estado_Ciclo']}")
+                st.markdown(f"📅 Último evento: {row['Ultima_Fecha']} | Días sin evento: {row['Dias_Sin_Evento']}")
+                if row['Dias_Estimados'] > 0:
+                    st.markdown(f"⏰ **Faltan aproximadamente {row['Dias_Estimados']} días**")
+            
             st.markdown("---")
+        
+        with st.expander("Ver tabla completa"):
+            st.dataframe(df_stats, hide_index=True)
 
 # PESTAÑA 2: DÍGITO FALTANTE
 with tabs[2]:
@@ -1094,7 +1159,19 @@ with tabs[2]:
         dias_stats_dig = st.slider("Días de análisis:", 30, 365, 180, key="dig_stats_dias")
         tipo_stats = st.selectbox("Ver estadísticas de:", ['general', 'centena', 'fijo', 'corrido1', 'corrido2'], key="sel_tipo_stats")
         
-        stats = estadisticas_digitos_separadas(df_completo, dias_stats_dig)
+        # --- CORRECCIÓN AQUÍ ---
+        # Se crea una copia filtrada de df_completo según el modo seleccionado en el sidebar
+        df_stats_input = df_completo.copy()
+        if modo == "Mañana":
+            df_stats_input = df_completo[df_completo['Tipo_Sorteo'] == 'M'].copy()
+        elif modo == "Tarde":
+            df_stats_input = df_completo[df_completo['Tipo_Sorteo'] == 'T'].copy()
+        elif modo == "Noche":
+            df_stats_input = df_completo[df_completo['Tipo_Sorteo'] == 'N'].copy()
+        
+        # Se pasa el dataframe filtrado a la función
+        stats = estadisticas_digitos_separadas(df_stats_input, dias_stats_dig)
+        # -----------------------
         
         st.markdown(f"### Estadísticas: {tipo_stats.upper()}")
         st.dataframe(stats[tipo_stats], use_container_width=True, hide_index=True)
