@@ -1466,35 +1466,34 @@ with tabs[7]:
             else:
                 st.error(f"🛑 Error en el análisis")
 
-# PESTAÑA 8: ESTABILIDAD
+PESTAÑA 8: ESTABILIDAD
 with tabs[8]:
-    st.subheader("📉 Estabilidad")
-    
-    dias_analisis = st.slider("Días de Historial:", 90, 3650, 365, step=30, key="est_dias")
-    
-    if st.button("📊 Calcular", key="b_est"):
-        with st.spinner("Analizando..."):
-            df_est = analizar_estabilidad_numeros(dfa, dias_analisis)
+st.subheader("📉 Estabilidad")
+dias_analisis = st.slider( "Días de Historial: ", 90, 3650, 365, step=30, key= "est_dias ")
+
+if st.button( "📊 Calcular ", key= "b_est "):
+    with st.spinner( "Analizando... "):
+        df_est = analizar_estabilidad_numeros(dfa, dias_analisis)
+        
+        if df_est is None:
+            st.error( "Sin datos suficientes. ")
+        else:
+            st.markdown( "### 🏆 Ranking (Top 100) ")
             
-            if df_est is None:
-                st.error("Sin datos suficientes.")
-            else:
-                st.markdown("### 🏆 Ranking")
-                
-                st.dataframe(
-                    df_est.head(30),
-                    column_config={
-                        "Estado": st.column_config.TextColumn("Estado"),
-                        "Gap Actual": st.column_config.NumberColumn("Días sin salir", format="%d"),
-                        "Gap Máximo (Días)": st.column_config.NumberColumn("Max", format="%d"),
-                        "Gap Promedio": st.column_config.NumberColumn("Prom", format="%.1f"),
-                        "Desviación (Irregularidad)": st.column_config.NumberColumn("Irreg", format="%.1f"),
-                        "Última Salida": st.column_config.TextColumn("Último")
-                    },
-                    hide_index=True
-                )
-                
-                st.info("💡 **Estados:** 🔥 EN RACHA | ✅ NORMAL | ⏳ VENCIDO | 🔴 MUY VENCIDO")
+            st.dataframe(
+                df_est.head(100),  # ✅ CAMBIO REALIZADO: Ahora muestra 100 números en lugar de 30
+                column_config={
+                     "Estado ": st.column_config.TextColumn( "Estado "),
+                     "Gap Actual ": st.column_config.NumberColumn( "Días sin salir ", format= "%d "),
+                     "Gap Máximo (Días) ": st.column_config.NumberColumn( "Max ", format= "%d "),
+                     "Gap Promedio ": st.column_config.NumberColumn( "Prom ", format= "%.1f "),
+                     "Desviación (Irregularidad) ": st.column_config.NumberColumn( "Irreg ", format= "%.1f "),
+                     "Última Salida ": st.column_config.TextColumn( "Último ")
+                },
+                hide_index=True
+            )
+            
+            st.info( "💡 **Estados:** 🔥 EN RACHA | ✅ NORMAL | ⏳ VENCIDO | 🔴 MUY VENCIDO ")
 
 st.markdown("---")
 st.caption("🍑 Geotodo Suite Ultimate v2.0 | Conectado a Google Sheets")
