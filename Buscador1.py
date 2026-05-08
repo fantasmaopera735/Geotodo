@@ -1466,34 +1466,80 @@ with tabs[7]:
             else:
                 st.error(f"🛑 Error en el análisis")
 
-PESTAÑA 8: ESTABILIDAD
+# PESTAÑA 8: ESTABILIDAD
 with tabs[8]:
-st.subheader("📉 Estabilidad")
-dias_analisis = st.slider( "Días de Historial: ", 90, 3650, 365, step=30, key= "est_dias ")
-
-if st.button( "📊 Calcular ", key= "b_est "):
-    with st.spinner( "Analizando... "):
-        df_est = analizar_estabilidad_numeros(dfa, dias_analisis)
-        
-        if df_est is None:
-            st.error( "Sin datos suficientes. ")
-        else:
-            st.markdown( "### 🏆 Ranking (Top 100) ")
+    st.subheader("📉 Estabilidad")
+    
+    # Controles: Slider de días y Filtro por Estado
+    col_ctrl1, col_ctrl2 = st.columns([2, 1])
+    with col_ctrl1:
+        dias_analisis = st.slider("Días de Historial: ", 90, 3650, 365, step=30, key="est_dias")
+    with col_ctrl2:
+        filtro_estado = st.selectbox("Filtrar por Estado:", 
+                                     ["Todos", "🔴 MUY VENCIDO", "⏳ VENCIDO", "✅ NORMAL", "🔥 EN RACHA"],
+                                     key="est_filtro")
+    
+    if st.button("📊 Calcular", key="b_est"):
+        with st.spinner("Analizando..."):
+            df_est = analizar_estabilidad_numeros(dfa, dias_analisis)
             
-            st.dataframe(
-                df_est.head(100),  # ✅ CAMBIO REALIZADO: Ahora muestra 100 números en lugar de 30
-                column_config={
-                     "Estado ": st.column_config.TextColumn( "Estado "),
-                     "Gap Actual ": st.column_config.NumberColumn( "Días sin salir ", format= "%d "),
-                     "Gap Máximo (Días) ": st.column_config.NumberColumn( "Max ", format= "%d "),
-                     "Gap Promedio ": st.column_config.NumberColumn( "Prom ", format= "%.1f "),
-                     "Desviación (Irregularidad) ": st.column_config.NumberColumn( "Irreg ", format= "%.1f "),
-                     "Última Salida ": st.column_config.TextColumn( "Último ")
-                },
-                hide_index=True
-            )
-            
-            st.info( "💡 **Estados:** 🔥 EN RACHA | ✅ NORMAL | ⏳ VENCIDO | 🔴 MUY VENCIDO ")
+            if df_est is None:
+                st.error("Sin datos suficientes.")
+            else:
+                # 🔹 AGREGAR: Columna de Frecuencia (Veces que salió en el periodo seleccionado)
+                df_est['Frec. Periodo'] = df_est.apply(
+                    lambda row: len(dfa[(dfa['Numero'] == int(row['Número'])) & 
+                                       (dfa['Fecha'] >= datetime.now() - timedelta(days=dias_analisis))]),
+                    axis=1
+                )
+                
+                # 🔹 AGREGAR: Columna de Puntaje Estratégico
+                # Fórmula: Presión del Gap + Predictibilidad (baja desviación) + Bonus de Frecuencia
+                def calcular_puntaje(row):
+                    presion = (row['Gap Actual'] / row['Gap Máximo (Días)'] * 50) if row['Gap Máximo (Días)'] > 0 else 0
+                    predict = max(0, 100 - row['Desviación (Irregularidad)'] * 0.3)
+                    freq_bonus = row['Frec. Periodo'] * 0.5
+                    return round(presion + predict + freq_bonus, 1)
+                
+                df_est['Puntaje'] = df_est.apply(calcular_puntaje, axis=1)
+                
+                # 🔹 APLICAR FILTRO POR ESTADO
+                if filtro_estado != "Todos":
+                    df_est = df_est[df_est['Estado'] == filtro_estado]
+                
+                # Ordenar por Puntaje descendente (Los mejores primero)
+                df_est = df_est.sort_values('Puntaje', ascending=False).reset_index(drop=True)
+                
+                st.markdown("### 🏆 Ranking por Puntaje Estratégico")
+                
+                # 🔹 AGREGAR: Botón de descarga
+                csv = df_est.to_csv(index=False).encode('utf-8')
+                st.download_button(
+                    label="📥 Descargar tabla completa (CSV)",
+                    data=csv,
+                    file_name=f"estabilidad_{dias_analisis}dias.csv",
+                    mime="text/csv"
+                )
+                
+                # 🔹 CAMBIO: Mostrar 100 filas en lugar de 30
+                st.dataframe(
+                    df_est.head(100),
+                    column_config={
+                        "Estado": st.column_config.TextColumn("Estado"),
+                        "Gap Actual": st.column_config.NumberColumn("Días sin salir", format="%d"),
+                        "Gap Máximo (Días)": st.column_config.NumberColumn("Max", format="%d"),
+                        "Gap Promedio": st.column_config.NumberColumn("Prom", format="%.1f"),
+                        "Desviación (Irregularidad)": st.column_config.NumberColumn("Irreg", format="%.1f"),
+                        "Frec. Periodo": st.column_config.NumberColumn("Frec.", format="%d", help="Veces que salió en este periodo"),
+                        "Puntaje": st.column_config.ProgressColumn("Score", format="%.1f", min_value=0, max_value=200),
+                        "Última Salida": st.column_config.TextColumn("Último")
+                    },
+                    hide_index=True,
+                    use_container_width=True
+                )
+                
+                st.info("💡 **Estados:** 🔥 EN RACHA | ✅ NORMAL | ⏳ VENCIDO | 🔴 MUY VENCIDO")
+                st.caption("📊 **Puntaje:** Combina presión de gap + predictibilidad + frecuencia. Mayor = más prioritario.")
 
 st.markdown("---")
 st.caption("🍑 Geotodo Suite Ultimate v2.0 | Conectado a Google Sheets")
